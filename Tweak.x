@@ -1,5 +1,11 @@
 #import <UIKit/UIKit.h>
 
+// ====== 消除 ARC 警告的终极办法：直接向编译器声明这两个第三方库的方法 ======
+@interface NSObject (ZZModelToJSON)
+- (id)mj_keyValues;
+- (id)yy_modelToJSONObject;
+@end
+
 // 1. 声明网络请求模型
 @interface ZZInfoDetailRequestModel : NSObject
 @property (copy, nonatomic) NSString *infoID;
@@ -23,7 +29,7 @@
 @property (retain, nonatomic) ZZListingResponseModel *firstPageResponseData;
 - (void)loadData;
 - (void)real_reloadData:(id)arg;
-- (void)reloadListingGoodsWithRespModel:(id)arg; // 触发 ZZFLEX 引擎重绘的核心方法
+- (void)reloadListingGoodsWithRespModel:(id)arg; 
 
 // 自定义注入的方法
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture;
@@ -128,7 +134,6 @@
         }
 
         // ====== 核心改进 1：先进行深度本地搜索 ======
-        // 如果列表自带的标签、扩展字段里已经包含了版本号，直接跳过网络请求，极速处理！
         if ([self custom_isObject:item matchTarget:version]) {
             [lock lock];
             [matchedInfoIds addObject:infoId];
@@ -146,7 +151,7 @@
         ZZGoodsDetailProxy *proxy = [[NSClassFromString(@"ZZGoodsDetailProxy") alloc] init];
         [proxy requestGoodsDetailDateWithRequestModel:reqModel success:^(id response) {
             
-            // 解析详情数据（也是用极深度的反解析方法）
+            // 解析详情数据
             if ([self custom_isObject:response matchTarget:version]) {
                 [lock lock];
                 [matchedInfoIds addObject:infoId];
@@ -216,27 +221,31 @@
     
     @try {
         // 方法 A：尝试将其转为字典 (利用转转内嵌的 MJExtension 库)
-        if ([object respondsToSelector:NSSelectorFromString(@"mj_keyValues")]) {
-            id dict = [object performSelector:NSSelectorFromString(@"mj_keyValues")];
+        if ([object respondsToSelector:@selector(mj_keyValues)]) {
+            id dict = [object mj_keyValues];
             if (dict && [[dict description] containsString:target]) {
                 return YES;
             }
         }
         
         // 方法 B：尝试将其转为字典 (利用转转内嵌的 YYModel 库)
-        if ([object respondsToSelector:NSSelectorFromString(@"yy_modelToJSONObject")]) {
-            id dict = [object performSelector:NSSelectorFromString(@"yy_modelToJSONObject")];
+        if ([object respondsToSelector:@selector(yy_modelToJSONObject)]) {
+            id dict = [object yy_modelToJSONObject];
             if (dict && [[dict description] containsString:target]) {
                 return YES;
             }
         }
         
         // 方法 C：直接提取常见字段兜底
-        NSArray *keys = @[@"title", @"desc", @"extendJson", @"userInfoLabelText", @"priceDesc", @"userCateLabelDesc", @"titleAndContent", @"sellerDescription"];
+        NSArray *keys = @[@"title", @"desc", @"extendJson", @"userInfoLabelText", @"priceDesc", @"userCateLabelDesc", @"titleAndContent", @"sellerDescription", @"param"];
         for (NSString *key in keys) {
             id val = [object valueForKey:key];
             if ([val isKindOfClass:[NSString class]] && [(NSString *)val containsString:target]) {
                 return YES;
+            } else if ([val isKindOfClass:[NSArray class]] || [val isKindOfClass:[NSDictionary class]]) {
+                if ([[val description] containsString:target]) {
+                    return YES;
+                }
             }
         }
         
