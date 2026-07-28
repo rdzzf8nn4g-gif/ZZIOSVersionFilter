@@ -1,34 +1,36 @@
 #import <UIKit/UIKit.h>
 
-// 1. 声明网络请求模型
+// ====== 1. 声明转转真实的网络请求类 ======
 @interface ZZInfoDetailRequestModel : NSObject
 @property (copy, nonatomic) NSString *infoID;
 @property (nonatomic) unsigned long long from;
 @property (copy, nonatomic) NSString *pageType;
 @end
 
-// 2. 声明真实详情网络请求代理类
 @interface ZZGoodsDetailProxy : NSObject
 - (void)requestGoodsDetailDateWithRequestModel:(id)a0 success:(void(^)(id response))a1 failure:(void(^)(id error))a2;
 @end
 
-// 3. 声明响应体数据模型
 @interface ZZListingResponseModel : NSObject
 @property (retain, nonatomic) NSMutableArray *infos;
 @end
 
-// 4. 声明转转的列表控制器
+// ====== 2. 声明列表控制器 ======
 @interface ZZListingAprilViewController : UIViewController
 @property (retain, nonatomic) NSArray *dataArray;
 @property (retain, nonatomic) ZZListingResponseModel *firstPageResponseData;
-- (void)loadData;
+@property (retain, nonatomic) ZZListingResponseModel *lastPageResponseData;
 
-// 自定义方法
+- (void)loadData;
+- (void)reloadListingGoodsWithRespModel:(id)arg;
+
+// 我们的自定义方法
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture;
 - (void)custom_fetchDetailAndFilterWithVersion:(NSString *)version;
-- (BOOL)custom_safeMatchObject:(id)obj target:(NSString *)target;
-- (NSString *)custom_extractInfoId:(id)obj;
+- (void)custom_findInfoIdsInObject:(id)obj intoSet:(NSMutableSet *)set visited:(NSMutableSet *)visited;
+- (void)custom_reloadCollectionView;
 @end
+
 
 %hook ZZListingAprilViewController
 
@@ -45,8 +47,8 @@
 %new
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"系统版本深度筛选" 
-                                                                       message:@"请输入想筛选的iOS版本\n(全安全模式：精准提取深层参数，杜绝闪退)" 
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"系统版本深度检索" 
+                                                                       message:@"请输入想筛选的iOS版本\n(将在后台静默拉取详情页参数)" 
                                                                 preferredStyle:UIAlertControllerStyleAlert];
         
         [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
@@ -81,20 +83,25 @@
 
 %new
 - (void)custom_fetchDetailAndFilterWithVersion:(NSString *)version {
-    // 1. 直击最底层数据，避开 ZZFLEX 分组包装壳
-    if (!self.firstPageResponseData || ![self.firstPageResponseData respondsToSelector:NSSelectorFromString(@"infos")]) {
-        return;
-    }
-    NSArray *infos = [self.firstPageResponseData valueForKey:@"infos"];
-    if (!infos || infos.count == 0) {
-        UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"提示" message:@"列表暂无数据，请向下滑动加载或刷新后再试" preferredStyle:UIAlertControllerStyleAlert];
+    // 1. 深度递归提取当前屏幕上所有的商品 ID (infoId)
+    NSMutableSet *infoIds = [NSMutableSet set];
+    NSMutableSet *visited = [NSMutableSet set];
+    
+    [self custom_findInfoIdsInObject:self.firstPageResponseData intoSet:infoIds visited:visited];
+    [self custom_findInfoIdsInObject:self.lastPageResponseData intoSet:infoIds visited:visited];
+    [self custom_findInfoIdsInObject:self.dataArray intoSet:infoIds visited:visited];
+    
+    if (infoIds.count == 0) {
+        UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"提取失败" message:@"未能在当前页面识别到任何商品，请向下滑动加载或刷新后再试。" preferredStyle:UIAlertControllerStyleAlert];
         [emptyAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
         [self presentViewController:emptyAlert animated:YES completion:nil];
         return;
     }
     
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在静默拉取与分析..." 
-                                                                          message:@"正在安全提取底层参数，请稍候..." 
+    // 2. 告诉用户提取到了多少个，准备开始网络请求
+    NSString *loadingMsg = [NSString stringWithFormat:@"已识别到 %lu 个商品\n正在后台并发拉取详情数据，请稍候...", (unsigned long)infoIds.count];
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在静默拉取" 
+                                                                          message:loadingMsg 
                                                                    preferredStyle:UIAlertControllerStyleAlert];
     [self presentViewController:loadingAlert animated:YES completion:nil];
     
@@ -102,47 +109,72 @@
     NSMutableSet *matchedInfoIds = [NSMutableSet set];
     NSLock *lock = [[NSLock alloc] init];
     
-    __block int localMatchCount = 0;
     __block int netMatchCount = 0;
+    __block int netFailCount = 0;
     
-    // 对输入的版本号进行标准化处理（去空格 + 全小写），比如 "15.4"
+    // 目标版本号标准化处理 (去空格 + 全小写)
     NSString *target = [[version lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
     
-    for (id item in infos) {
-        NSString *infoId = [self custom_extractInfoId:item];
-        if (!infoId || infoId.length == 0) continue;
-
-        // ====== 阶段一：本地绝对安全匹配 ======
-        if ([self custom_safeMatchObject:item target:target]) {
-            [lock lock];
-            [matchedInfoIds addObject:infoId];
-            localMatchCount++;
-            [lock unlock];
-            continue; // 本地找到了，极速跳过网络请求！
-        }
-
-        // ====== 阶段二：网络详情并发拉取 ======
+    // 3. 遍历所有的 infoId 发起真实的详情页网络请求
+    for (NSString *infoId in infoIds) {
         dispatch_group_enter(group);
         
         ZZInfoDetailRequestModel *reqModel = [[NSClassFromString(@"ZZInfoDetailRequestModel") alloc] init];
-        reqModel.infoID = infoId;
-        reqModel.from = 1; 
-        reqModel.pageType = @"1";
+        [reqModel setValue:infoId forKey:@"infoID"];
+        [reqModel setValue:@(1) forKey:@"from"];
+        [reqModel setValue:@"1" forKey:@"pageType"];
         
         id proxy = [[NSClassFromString(@"ZZGoodsDetailProxy") alloc] init];
         if ([proxy respondsToSelector:NSSelectorFromString(@"requestGoodsDetailDateWithRequestModel:success:failure:")]) {
+            
+            // 发起请求
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             [proxy requestGoodsDetailDateWithRequestModel:reqModel success:^(id response) {
-                // 安全解析拉取回来的详情模型
-                if ([self custom_safeMatchObject:response target:target]) {
+                BOOL isMatch = NO;
+                @try {
+                    // 安全提取详情页的 param 数组 (ZZGoodsDetailParamModel)
+                    NSArray *params = [response valueForKey:@"param"];
+                    if ([params isKindOfClass:[NSArray class]]) {
+                        for (id pItem in params) {
+                            NSString *pVal = [[pItem valueForKey:@"paramValue"] description];
+                            if (pVal) {
+                                NSString *cleanVal = [[pVal lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
+                                if ([cleanVal containsString:target]) {
+                                    isMatch = YES;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // 兜底：检查详情里的 title 和 content
+                    if (!isMatch) {
+                        NSString *title = [[response valueForKey:@"title"] description];
+                        NSString *content = [[response valueForKey:@"content"] description];
+                        NSString *sellerDesc = [[response valueForKey:@"sellerDescription"] description];
+                        
+                        if (title && [[[title lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""] containsString:target]) isMatch = YES;
+                        if (content && [[[content lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""] containsString:target]) isMatch = YES;
+                        if (sellerDesc && [[[sellerDesc lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""] containsString:target]) isMatch = YES;
+                    }
+                } @catch(NSException *e){}
+                
+                if (isMatch) {
                     [lock lock];
                     [matchedInfoIds addObject:infoId];
                     netMatchCount++;
                     [lock unlock];
                 }
                 dispatch_group_leave(group);
+                
             } failure:^(id error) {
+                [lock lock];
+                netFailCount++;
+                [lock unlock];
                 dispatch_group_leave(group);
             }];
+            #pragma clang diagnostic pop
+            
         } else {
             dispatch_group_leave(group);
         }
@@ -150,40 +182,56 @@
     
     __weak typeof(self) weakSelf = self;
     
-    // 5. 等待所有并发请求拉取完毕
+    // 4. 所有请求结束后更新列表
     dispatch_group_notify(group, dispatch_get_main_queue(), ^{
         [loadingAlert dismissViewControllerAnimated:YES completion:^{
             
-            // 组装结果
-            NSMutableArray *filteredInfos = [NSMutableArray array];
-            for (id item in infos) {
-                NSString *infoId = [weakSelf custom_extractInfoId:item];
-                if (infoId && [matchedInfoIds containsObject:infoId]) {
-                    [filteredInfos addObject:item];
-                }
-            }
+            // 过滤数组的内联函数，把没命中的商品从列表中剔除
+            void (^filterResponseData)(id) = ^(id respData) {
+                if (!respData) return;
+                @try {
+                    NSMutableArray *infos = [respData valueForKey:@"infos"];
+                    if ([infos isKindOfClass:[NSArray class]]) {
+                        NSMutableArray *filtered = [NSMutableArray array];
+                        for (id item in infos) {
+                            NSString *iId = nil;
+                            if ([item respondsToSelector:NSSelectorFromString(@"infoId")]) iId = [[item valueForKey:@"infoId"] description];
+                            else if ([item respondsToSelector:NSSelectorFromString(@"infoID")]) iId = [[item valueForKey:@"infoID"] description];
+                            
+                            // 只要该商品被命中，就保留它
+                            if (iId && [matchedInfoIds containsObject:iId]) {
+                                [filtered addObject:item];
+                            }
+                        }
+                        [respData setValue:filtered forKey:@"infos"];
+                    }
+                } @catch(NSException *e){}
+            };
             
-            if (filteredInfos.count > 0) {
-                // 彻底替换转转的底层数据源
-                [weakSelf.firstPageResponseData setValue:filteredInfos forKey:@"infos"];
-                
-                // 消除 ARC 警告，安全调用原生刷新方法
+            // 过滤第一页和可能存在的下一页数据
+            filterResponseData(weakSelf.firstPageResponseData);
+            filterResponseData(weakSelf.lastPageResponseData);
+            
+            // ====== 核心：通知转转框架重绘 UI ======
+            if (matchedInfoIds.count > 0) {
                 if ([weakSelf respondsToSelector:NSSelectorFromString(@"reloadListingGoodsWithRespModel:")]) {
                     #pragma clang diagnostic push
                     #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                    // 重新把过滤后的第一页数据喂给框架
                     [weakSelf performSelector:NSSelectorFromString(@"reloadListingGoodsWithRespModel:") withObject:weakSelf.firstPageResponseData];
                     #pragma clang diagnostic pop
+                } else {
+                    [weakSelf custom_reloadCollectionView];
                 }
                 
-                NSString *resultMsg = [NSString stringWithFormat:@"列表提取成功: %d 条\n底层网络拉取: %d 条", localMatchCount, netMatchCount];
-                UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"筛选完成" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
-                [successAlert addAction:[UIAlertAction actionWithTitle:@"好的" style:UIAlertActionStyleDefault handler:nil]];
+                NSString *resultMsg = [NSString stringWithFormat:@"共扫描商品: %lu 个\n成功匹配到: %d 个\n网络拉取失败: %d 个", (unsigned long)infoIds.count, netMatchCount, netFailCount];
+                UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"筛选成功" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
+                [successAlert addAction:[UIAlertAction actionWithTitle:@"完美" style:UIAlertActionStyleDefault handler:nil]];
                 [weakSelf presentViewController:successAlert animated:YES completion:nil];
                 
             } else {
-                UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"未能筛到相关商品" 
-                                                                                    message:@"深层安全扫描了本页所有商品及详情参数\n未发现该系统版本！请下拉加载下一页。"
-                                                                             preferredStyle:UIAlertControllerStyleAlert];
+                NSString *resultMsg = [NSString stringWithFormat:@"共扫描商品: %lu 个\n匹配到系统版本: 0 个\n网络拉取失败: %d 个\n\n如果拉取失败较多，可能是网络拥堵。请下拉加载更多后重试。", (unsigned long)infoIds.count, netFailCount];
+                UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"筛选结果为空" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                 [emptyAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
                 [weakSelf presentViewController:emptyAlert animated:YES completion:nil];
             }
@@ -191,88 +239,70 @@
     });
 }
 
-// ====== 智能提取商品 ID ======
+// ====== 万能 ID 提取器 (通过深度遍历剥洋葱，解决嵌套太深找不到 ID 的问题) ======
 %new
-- (NSString *)custom_extractInfoId:(id)obj {
-    if (!obj) return nil;
-    @try {
-        if ([obj respondsToSelector:NSSelectorFromString(@"infoId")]) {
-            id val = [obj valueForKey:@"infoId"];
-            if ([val isKindOfClass:[NSString class]]) return val;
-            if ([val isKindOfClass:[NSNumber class]]) return [(NSNumber *)val stringValue];
-        }
-        if ([obj respondsToSelector:NSSelectorFromString(@"infoID")]) {
-            id val = [obj valueForKey:@"infoID"];
-            if ([val isKindOfClass:[NSString class]]) return val;
-            if ([val isKindOfClass:[NSNumber class]]) return [(NSNumber *)val stringValue];
-        }
-        // 如果数据被包装，安全剥开
-        if ([obj respondsToSelector:NSSelectorFromString(@"dataModel")]) {
-            id inner = [obj valueForKey:@"dataModel"];
-            if (inner && inner != obj) return [self custom_extractInfoId:inner];
-        }
-        if ([obj respondsToSelector:NSSelectorFromString(@"feedModel")]) {
-            id inner = [obj valueForKey:@"feedModel"];
-            if (inner && inner != obj) return [self custom_extractInfoId:inner];
-        }
-    } @catch(NSException *e) {}
-    return nil;
-}
-
-// ====== 绝对安全防闪退文本提取器 ======
-%new
-- (BOOL)custom_safeMatchObject:(id)obj target:(NSString *)target {
-    if (!obj) return NO;
+- (void)custom_findInfoIdsInObject:(id)obj intoSet:(NSMutableSet *)set visited:(NSMutableSet *)visited {
+    if (!obj || [visited containsObject:[NSValue valueWithNonretainedObject:obj]]) return;
+    [visited addObject:[NSValue valueWithNonretainedObject:obj]];
     
-    // 1. 直取最可能含有文字的字段，避开任何对象转换
-    NSArray *stringKeys = @[@"title", @"desc", @"content", @"sellerDescription", 
-                            @"titleAndContent", @"extendJson", @"userInfoLabelText", 
-                            @"userCateLabelDesc", @"priceDesc", @"subTitle", @"paramValue"];
-                            
-    for (NSString *key in stringKeys) {
+    // 如果是数组
+    if ([obj isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)obj) {
+            [self custom_findInfoIdsInObject:item intoSet:set visited:visited];
+        }
+        return;
+    }
+    
+    // 如果是字典
+    if ([obj isKindOfClass:[NSDictionary class]]) {
+        for (id key in (NSDictionary *)obj) {
+            [self custom_findInfoIdsInObject:[(NSDictionary *)obj objectForKey:key] intoSet:set visited:visited];
+        }
+        return;
+    }
+    
+    // 尝试提取 infoId
+    @try {
+        NSString *iId = nil;
+        if ([obj respondsToSelector:NSSelectorFromString(@"infoId")]) {
+            iId = [[obj valueForKey:@"infoId"] description];
+        } else if ([obj respondsToSelector:NSSelectorFromString(@"infoID")]) {
+            iId = [[obj valueForKey:@"infoID"] description];
+        }
+        
+        // 过滤掉误判的短字符串，转转的 infoId 一般是一长串数字
+        if (iId.length > 8 && [iId longLongValue] > 0) {
+            [set addObject:iId];
+        }
+    } @catch(NSException *e){}
+    
+    // 如果没提取到，继续往底层壳子钻
+    NSArray *keys = @[@"infos", @"viewItems", @"searchResult", @"dataModel", @"feedModel", @"itemModel"];
+    for (NSString *key in keys) {
         @try {
             if ([obj respondsToSelector:NSSelectorFromString(key)]) {
                 id val = [obj valueForKey:key];
-                if ([val isKindOfClass:[NSString class]]) {
-                    NSString *cleanVal = [[(NSString *)val lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
-                    if ([cleanVal containsString:target]) return YES;
+                if (val) {
+                    [self custom_findInfoIdsInObject:val intoSet:set visited:visited];
                 }
             }
-        } @catch (NSException *e) {}
+        } @catch(NSException *e){}
     }
-    
-    // 2. 单独安全解析参数数组 (ZZGoodsDetailModel -> param)
-    @try {
-        if ([obj respondsToSelector:NSSelectorFromString(@"param")]) {
-            id paramArr = [obj valueForKey:@"param"];
-            if ([paramArr isKindOfClass:[NSArray class]]) {
-                for (id pItem in (NSArray *)paramArr) {
-                    if ([pItem respondsToSelector:NSSelectorFromString(@"paramValue")]) {
-                        id pVal = [pItem valueForKey:@"paramValue"];
-                        if ([pVal isKindOfClass:[NSString class]]) {
-                            NSString *cleanVal = [[(NSString *)pVal lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
-                            if ([cleanVal containsString:target]) return YES;
-                        }
-                    }
-                }
-            }
-        }
-    } @catch (NSException *e) {}
+}
 
-    // 3. 安全解析嵌套模型 (避免递归无限循环)
-    NSArray *wrapperKeys = @[@"dataModel", @"feedModel"];
-    for (NSString *key in wrapperKeys) {
-        @try {
-            if ([obj respondsToSelector:NSSelectorFromString(key)]) {
-                id innerObj = [obj valueForKey:key];
-                if (innerObj && innerObj != obj) {
-                    if ([self custom_safeMatchObject:innerObj target:target]) return YES;
-                }
-            }
-        } @catch (NSException *e) {}
+// 暴力刷新视图兜底方法
+%new
+- (void)custom_reloadCollectionView {
+    NSMutableArray *queue = [NSMutableArray arrayWithObject:self.view];
+    while (queue.count > 0) {
+        UIView *currentView = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        
+        if ([currentView isKindOfClass:[UICollectionView class]]) [(UICollectionView *)currentView reloadData];
+        else if ([currentView isKindOfClass:[UITableView class]]) [(UITableView *)currentView reloadData];
+        
+        [queue addObjectsFromArray:currentView.subviews];
     }
-    
-    return NO;
 }
 
 %end
