@@ -1,39 +1,22 @@
 #import <UIKit/UIKit.h>
-#import <objc/runtime.h> // 引入 Objective-C 运行时机制
+#import <objc/runtime.h> // 必须引入 Runtime
 
-// ====== 1. 声明转转的网络请求类 ======
-@interface ZZInfoDetailRequestModel : NSObject
-@property (copy, nonatomic) NSString *infoID;
-@property (nonatomic) unsigned long long from;
-@property (copy, nonatomic) NSString *pageType;
+// ====== 消除 ARC 警告 ======
+@interface NSObject (ZZModelToJSON)
+- (id)mj_keyValues;
 @end
 
-@interface ZZGoodsDetailProxy : NSObject
-- (void)requestGoodsDetailDateWithRequestModel:(id)a0 success:(void(^)(id response))a1 failure:(void(^)(id error))a2;
-@end
-
-@interface ZZInfoDetailProxy : NSObject
-- (void)requestInfoDetailDatas:(id)a0 success:(void(^)(id response))a1 failure:(void(^)(id error))a2;
-@end
-
-@interface ZZListingResponseModel : NSObject
-@property (retain, nonatomic) NSMutableArray *infos;
-@end
-
-// ====== 2. 声明列表控制器 ======
+// ====== 声明控制器 ======
 @interface ZZListingAprilViewController : UIViewController
 @property (retain, nonatomic) NSArray *dataArray;
-@property (retain, nonatomic) ZZListingResponseModel *firstPageResponseData;
-@property (retain, nonatomic) ZZListingResponseModel *lastPageResponseData;
-
 - (void)loadData;
-- (void)reloadListingGoodsWithRespModel:(id)arg;
 
-// 自定义方法
+// 自定义方法声明
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture;
-- (void)custom_fetchDetailAndFilterWithVersion:(NSString *)version;
-- (void)custom_findInfoIdsInObject:(id)obj intoSet:(NSMutableSet *)set visited:(NSMutableSet *)visited;
-- (BOOL)custom_safeDeepSearch:(id)obj target:(NSString *)target visited:(NSMutableSet *)visited depth:(int)depth;
+- (void)custom_filterLocallyWithVersion:(NSString *)version;
+- (void)custom_pruneArray:(NSMutableArray *)array target:(NSString *)target kept:(int *)kept removed:(int *)removed;
+- (BOOL)custom_deepSearch:(id)obj target:(NSString *)target visited:(NSMutableSet *)visited depth:(int)depth;
+- (NSString *)custom_extractInfoId:(id)obj;
 - (void)custom_reloadCollectionView;
 @end
 
@@ -53,8 +36,8 @@
 %new
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"系统版本运行时检索" 
-                                                                       message:@"请输入想筛选的iOS版本\n(将使用 Runtime 级深度透视与双路 API 并发)" 
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"列表版本秒切系统" 
+                                                                       message:@"请输入想筛选的iOS版本\n(已搭载富文本及底层变量强力解析引擎)" 
                                                                 preferredStyle:UIAlertControllerStyleAlert];
         
         [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
@@ -67,7 +50,7 @@
         UIAlertAction *confirmAction = [UIAlertAction actionWithTitle:@"开始筛选" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
             NSString *versionText = alert.textFields.firstObject.text;
             if (versionText.length > 0) {
-                [weakSelf custom_fetchDetailAndFilterWithVersion:versionText];
+                [weakSelf custom_filterLocallyWithVersion:versionText];
             }
         }];
         
@@ -88,269 +71,209 @@
 }
 
 %new
-- (void)custom_fetchDetailAndFilterWithVersion:(NSString *)version {
-    // 1. 递归提取所有 infoId
-    NSMutableSet *infoIds = [NSMutableSet set];
-    NSMutableSet *visited = [NSMutableSet set];
-    
-    [self custom_findInfoIdsInObject:self.firstPageResponseData intoSet:infoIds visited:visited];
-    [self custom_findInfoIdsInObject:self.lastPageResponseData intoSet:infoIds visited:visited];
-    [self custom_findInfoIdsInObject:self.dataArray intoSet:infoIds visited:visited];
-    
-    if (infoIds.count == 0) {
-        UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"提取失败" message:@"未能在页面内识别到任何商品 ID" preferredStyle:UIAlertControllerStyleAlert];
+- (void)custom_filterLocallyWithVersion:(NSString *)version {
+    if (!self.dataArray || self.dataArray.count == 0) {
+        UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"提示" message:@"当前列表无数据，请向下滑动加载或刷新后再试" preferredStyle:UIAlertControllerStyleAlert];
         [emptyAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
         [self presentViewController:emptyAlert animated:YES completion:nil];
         return;
     }
     
-    // 2. 弹出处理中提示
-    NSString *loadingMsg = [NSString stringWithFormat:@"已识别 %lu 个商品\n后台正在双路 API 并发拉取并进行 Runtime 透视...", (unsigned long)infoIds.count];
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"静默执行中" 
-                                                                          message:loadingMsg 
-                                                                   preferredStyle:UIAlertControllerStyleAlert];
-    [self presentViewController:loadingAlert animated:YES completion:nil];
-    
-    dispatch_group_t group = dispatch_group_create();
-    NSMutableSet *matchedInfoIds = [NSMutableSet set];
-    NSLock *lock = [[NSLock alloc] init];
-    
-    __block int netMatchCount = 0;
-    __block int netFailCount = 0;
-    __block NSString *sampleServerResponse = @""; // 截获服务器原始数据
-    
-    // 版本号处理 (去空格 + 全小写)
+    // 将输入的版本号转换为标准格式：无空格、全小写 (比如 " iOS  15.4" 会变成 "ios15.4")
     NSString *target = [[version lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
     
-    // 3. 遍历发请求
-    for (NSString *infoId in infoIds) {
-        ZZInfoDetailRequestModel *reqModel = [[NSClassFromString(@"ZZInfoDetailRequestModel") alloc] init];
-        [reqModel setValue:infoId forKey:@"infoID"];
-        [reqModel setValue:@(1) forKey:@"from"];
-        [reqModel setValue:@"1" forKey:@"pageType"];
-        
-        // 路线A：ZZGoodsDetailProxy (针对验机精品)
-        dispatch_group_enter(group);
-        id proxyA = [[NSClassFromString(@"ZZGoodsDetailProxy") alloc] init];
-        if ([proxyA respondsToSelector:NSSelectorFromString(@"requestGoodsDetailDateWithRequestModel:success:failure:")]) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [proxyA requestGoodsDetailDateWithRequestModel:reqModel success:^(id response) {
-                // 抓取第一个请求的服务器返回样本用于调试
-                if (sampleServerResponse.length == 0 && response) {
-                    @try {
-                        NSString *dump = [NSString stringWithFormat:@"%@", response];
-                        [lock lock];
-                        sampleServerResponse = dump.length > 300 ? [dump substringToIndex:300] : dump;
-                        [lock unlock];
-                    } @catch(...) {}
-                }
-                
-                // Runtime 极深透视
-                NSMutableSet *scanVisited = [NSMutableSet set];
-                if ([self custom_safeDeepSearch:response target:target visited:scanVisited depth:0]) {
-                    [lock lock];
-                    [matchedInfoIds addObject:infoId];
-                    netMatchCount++;
-                    [lock unlock];
-                }
-                dispatch_group_leave(group);
-            } failure:^(id error) {
-                [lock lock]; netFailCount++; [lock unlock];
-                dispatch_group_leave(group);
-            }];
-            #pragma clang diagnostic pop
-        } else {
-            dispatch_group_leave(group);
-        }
-        
-        // 路线B：ZZInfoDetailProxy (针对个人C2C)
-        dispatch_group_enter(group);
-        id proxyB = [[NSClassFromString(@"ZZInfoDetailProxy") alloc] init];
-        if ([proxyB respondsToSelector:NSSelectorFromString(@"requestInfoDetailDatas:success:failure:")]) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [proxyB requestInfoDetailDatas:reqModel success:^(id response) {
-                NSMutableSet *scanVisited = [NSMutableSet set];
-                if ([self custom_safeDeepSearch:response target:target visited:scanVisited depth:0]) {
-                    [lock lock];
-                    [matchedInfoIds addObject:infoId];
-                    netMatchCount++;
-                    [lock unlock];
-                }
-                dispatch_group_leave(group);
-            } failure:^(id error) {
-                dispatch_group_leave(group);
-            }];
-            #pragma clang diagnostic pop
-        } else {
-            dispatch_group_leave(group);
+    int keptCount = 0;
+    int removedCount = 0;
+    
+    // ====== 核心：ZZFLEX 内存原地切割 ======
+    // 转转的 dataArray 通常装着 SectionModel，里面有 itemsArray (它是 NSMutableArray)
+    if ([self.dataArray isKindOfClass:[NSMutableArray class]]) {
+        [self custom_pruneArray:(NSMutableArray *)self.dataArray target:target kept:&keptCount removed:&removedCount];
+    } else {
+        for (id section in self.dataArray) {
+            // 找出转转可能用来存放商品元素的数组属性
+            NSArray *keys = @[@"itemsArray", @"dataArray", @"items", @"viewModels", @"cellModels"];
+            for (NSString *key in keys) {
+                @try {
+                    id val = [section valueForKey:key];
+                    if ([val isKindOfClass:[NSMutableArray class]]) {
+                        // 如果找到了商品数组，执行清理裁剪
+                        [self custom_pruneArray:val target:target kept:&keptCount removed:&removedCount];
+                    }
+                } @catch(NSException *e){}
+            }
         }
     }
     
-    __weak typeof(self) weakSelf = self;
+    // 直接刷新视图
+    [self custom_reloadCollectionView];
     
-    // 4. 所有请求结束后更新列表
-    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
-        [loadingAlert dismissViewControllerAnimated:YES completion:^{
-            
-            // 数据源替换方法
-            void (^filterResponseData)(id) = ^(id respData) {
-                if (!respData) return;
-                @try {
-                    NSMutableArray *infos = [respData valueForKey:@"infos"];
-                    if ([infos isKindOfClass:[NSArray class]]) {
-                        NSMutableArray *filtered = [NSMutableArray array];
-                        for (id item in infos) {
-                            NSString *iId = nil;
-                            if ([item respondsToSelector:NSSelectorFromString(@"infoId")]) iId = [[item valueForKey:@"infoId"] description];
-                            else if ([item respondsToSelector:NSSelectorFromString(@"infoID")]) iId = [[item valueForKey:@"infoID"] description];
-                            
-                            if (iId && [matchedInfoIds containsObject:iId]) {
-                                [filtered addObject:item];
-                            }
-                        }
-                        [respData setValue:filtered forKey:@"infos"];
-                    }
-                } @catch(NSException *e){}
-            };
-            
-            filterResponseData(weakSelf.firstPageResponseData);
-            filterResponseData(weakSelf.lastPageResponseData);
-            
-            if (matchedInfoIds.count > 0) {
-                if ([weakSelf respondsToSelector:NSSelectorFromString(@"reloadListingGoodsWithRespModel:")]) {
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    [weakSelf performSelector:NSSelectorFromString(@"reloadListingGoodsWithRespModel:") withObject:weakSelf.firstPageResponseData];
-                    #pragma clang diagnostic pop
-                } else {
-                    [weakSelf custom_reloadCollectionView];
-                }
-                
-                NSString *resultMsg = [NSString stringWithFormat:@"共扫描商品: %lu 个\n成功匹配到: %d 个\n网络拉取失败: %d 个", (unsigned long)infoIds.count, netMatchCount, netFailCount];
-                UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"筛选成功" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
-                [successAlert addAction:[UIAlertAction actionWithTitle:@"完美" style:UIAlertActionStyleDefault handler:nil]];
-                [weakSelf presentViewController:successAlert animated:YES completion:nil];
-                
-            } else {
-                // 如果是 0 个匹配，直接把服务器返回的数据打印在弹窗上，用于究极诊断！
-                NSString *resultMsg = [NSString stringWithFormat:@"扫描商品: %lu个\n匹配: 0个\n失败: %d个\n\n【服务器返回截取】:\n%@", (unsigned long)infoIds.count, netFailCount, sampleServerResponse.length > 0 ? sampleServerResponse : @"无数据返回(可能被拦截)"];
-                UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"筛选结果为空" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
-                [emptyAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
-                [weakSelf presentViewController:emptyAlert animated:YES completion:nil];
-            }
-        }];
-    });
+    // 弹窗反馈结果
+    NSString *resultMsg = [NSString stringWithFormat:@"成功保留: %d 个\n剔除无关商品: %d 个", keptCount, removedCount];
+    if (keptCount > 0) {
+        UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"筛选成功" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
+        [successAlert addAction:[UIAlertAction actionWithTitle:@"完美" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:successAlert animated:YES completion:nil];
+    } else {
+        UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"未能筛到相关商品" 
+                                                                            message:@"已动用底层富文本引擎扫描屏幕上的所有数据，均未发现该版本！\n\n如果确认该版本存在，请检查输入是否正确；若未加载出来，请下拉加载更多。" 
+                                                                     preferredStyle:UIAlertControllerStyleAlert];
+        [emptyAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:emptyAlert animated:YES completion:nil];
+    }
 }
 
-// ====== Runtime 级全属性终极提取器 (绝对防闪退) ======
+// ====== 动态数组修剪器（原地剔除不符合要求的数据） ======
 %new
-- (BOOL)custom_safeDeepSearch:(id)obj target:(NSString *)target visited:(NSMutableSet *)visited depth:(int)depth {
-    if (!obj || depth > 5) return NO; // 限制深度为 5，杜绝爆栈
+- (void)custom_pruneArray:(NSMutableArray *)array target:(NSString *)target kept:(int *)kept removed:(int *)removed {
+    // 必须倒序遍历，否则删除元素会导致数组越界崩溃
+    for (NSInteger i = array.count - 1; i >= 0; i--) {
+        id item = array[i];
+        
+        // 判断这个元素是不是“商品”（有 ID 的才是商品，没有的可能是顶部横幅广告）
+        NSString *infoId = [self custom_extractInfoId:item];
+        
+        if (infoId && infoId.length > 5) {
+            // 这是一个商品！开始底层扫描
+            NSMutableSet *visited = [NSMutableSet set];
+            if ([self custom_deepSearch:item target:target visited:visited depth:0]) {
+                (*kept)++; // 匹配成功，保留！
+            } else {
+                [array removeObjectAtIndex:i]; // 没匹配到，彻底从内存中抹除！
+                (*removed)++;
+            }
+        } else if ([item isKindOfClass:[NSMutableArray class]]) {
+            // 如果遇到嵌套数组，继续钻进去修剪
+            [self custom_pruneArray:item target:target kept:kept removed:removed];
+        }
+    }
+}
+
+// ====== 终极底层属性扫描引擎（杜绝漏网之鱼） ======
+%new
+- (BOOL)custom_deepSearch:(id)obj target:(NSString *)target visited:(NSMutableSet *)visited depth:(int)depth {
+    if (!obj || depth > 5) return NO; // 限制深度，防止死循环导致 App 卡死
     
-    // 防循环引用验证
+    // 防环形引用锁
     NSValue *ptr = [NSValue valueWithNonretainedObject:obj];
     if ([visited containsObject:ptr]) return NO;
     [visited addObject:ptr];
     
-    // 字符串直接匹配
+    // 1. 突破点一：处理最常见的 NSString
     if ([obj isKindOfClass:[NSString class]]) {
-        NSString *cleanStr = [[(NSString *)obj lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
-        if ([cleanStr containsString:target]) return YES;
+        NSString *clean = [[(NSString *)obj lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
+        return [clean containsString:target];
+    }
+    
+    // 2. 突破点二：处理富文本 NSAttributedString (转转列表的标签经常用这个渲染)
+    if ([obj isKindOfClass:[NSAttributedString class]]) {
+        NSString *rawStr = [(NSAttributedString *)obj string];
+        if (rawStr) {
+            NSString *clean = [[rawStr lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
+            return [clean containsString:target];
+        }
         return NO;
     }
     
-    // 数字类型
+    // 3. 处理 Number
     if ([obj isKindOfClass:[NSNumber class]]) {
         return [[(NSNumber *)obj stringValue] containsString:target];
     }
     
-    // 数组类型
+    // 4. 处理数组
     if ([obj isKindOfClass:[NSArray class]]) {
         for (id item in (NSArray *)obj) {
-            if ([self custom_safeDeepSearch:item target:target visited:visited depth:depth+1]) return YES;
+            if ([self custom_deepSearch:item target:target visited:visited depth:depth+1]) return YES;
         }
         return NO;
     }
     
-    // 字典类型
+    // 5. 处理字典
     if ([obj isKindOfClass:[NSDictionary class]]) {
-        for (id key in (NSDictionary *)obj) {
-            if ([self custom_safeDeepSearch:[(NSDictionary *)obj objectForKey:key] target:target visited:visited depth:depth+1]) return YES;
+        for (id val in [(NSDictionary *)obj allValues]) {
+            if ([self custom_deepSearch:val target:target visited:visited depth:depth+1]) return YES;
         }
         return NO;
     }
     
-    // ====== Objective-C Runtime 动态遍历自定义对象的一切属性 ======
-    unsigned int outCount, i;
-    objc_property_t *properties = class_copyPropertyList([obj class], &outCount);
-    if (properties) {
-        for (i = 0; i < outCount; i++) {
-            objc_property_t property = properties[i];
-            const char *propName = property_getName(property);
-            if(propName) {
-                NSString *propertyName = [NSString stringWithUTF8String:propName];
+    // 6. 突破点三：Objective-C Runtime 强行读取底层实例变量（突破 Swift 私有变量限制）
+    unsigned int ivarCount = 0;
+    Ivar *ivars = class_copyIvarList([obj class], &ivarCount);
+    if (ivars) {
+        for (unsigned int i = 0; i < ivarCount; i++) {
+            Ivar ivar = ivars[i];
+            const char *typeEncoding = ivar_getTypeEncoding(ivar);
+            // 只有对象类型 ('@') 才能读取，否则会导致 EXC_BAD_ACCESS 闪退
+            if (typeEncoding && typeEncoding[0] == '@') {
                 @try {
-                    id val = [obj valueForKey:propertyName];
-                    if (val) {
-                        if ([self custom_safeDeepSearch:val target:target visited:visited depth:depth+1]) {
-                            free(properties);
-                            return YES;
-                        }
+                    id val = object_getIvar(obj, ivar);
+                    if (val && [self custom_deepSearch:val target:target visited:visited depth:depth+1]) {
+                        free(ivars);
+                        return YES;
                     }
-                } @catch (NSException *e) {}
+                } @catch(...) {} // 绝对防崩溃
             }
         }
-        free(properties);
+        free(ivars);
     }
+    
+    // 7. 兜底方案：尝试转为 JSON
+    @try {
+        if ([obj respondsToSelector:NSSelectorFromString(@"mj_keyValues")]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id dict = [obj performSelector:NSSelectorFromString(@"mj_keyValues")];
+            #pragma clang diagnostic pop
+            if ([dict isKindOfClass:[NSDictionary class]]) {
+                NSString *desc = [[dict description] lowercaseString];
+                desc = [desc stringByReplacingOccurrencesOfString:@" " withString:@""];
+                if ([desc containsString:target]) return YES;
+            }
+        }
+    } @catch(...) {}
     
     return NO;
 }
 
-// ====== 万能 ID 提取剥洋葱法 ======
+// ====== 万能 ID 提取器 ======
 %new
-- (void)custom_findInfoIdsInObject:(id)obj intoSet:(NSMutableSet *)set visited:(NSMutableSet *)visited {
-    if (!obj || [visited containsObject:[NSValue valueWithNonretainedObject:obj]]) return;
-    [visited addObject:[NSValue valueWithNonretainedObject:obj]];
-    
-    if ([obj isKindOfClass:[NSArray class]]) {
-        for (id item in (NSArray *)obj) [self custom_findInfoIdsInObject:item intoSet:set visited:visited];
-        return;
-    }
-    if ([obj isKindOfClass:[NSDictionary class]]) {
-        for (id key in (NSDictionary *)obj) [self custom_findInfoIdsInObject:[(NSDictionary *)obj objectForKey:key] intoSet:set visited:visited];
-        return;
-    }
-    
+- (NSString *)custom_extractInfoId:(id)obj {
+    if (!obj) return nil;
     @try {
-        NSString *iId = nil;
-        if ([obj respondsToSelector:NSSelectorFromString(@"infoId")]) iId = [[obj valueForKey:@"infoId"] description];
-        else if ([obj respondsToSelector:NSSelectorFromString(@"infoID")]) iId = [[obj valueForKey:@"infoID"] description];
-        
-        if (iId.length > 8 && [iId longLongValue] > 0) [set addObject:iId];
-    } @catch(NSException *e){}
-    
-    NSArray *keys = @[@"infos", @"viewItems", @"searchResult", @"dataModel", @"feedModel", @"itemModel"];
-    for (NSString *key in keys) {
+        id val = nil;
+        if ([obj respondsToSelector:NSSelectorFromString(@"infoId")]) val = [obj valueForKey:@"infoId"];
+        else if ([obj respondsToSelector:NSSelectorFromString(@"infoID")]) val = [obj valueForKey:@"infoID"];
+        else if ([obj isKindOfClass:[NSDictionary class]]) val = [(NSDictionary *)obj objectForKey:@"infoId"];
+
+        if ([val isKindOfClass:[NSString class]]) return val;
+        if ([val isKindOfClass:[NSNumber class]]) return [(NSNumber *)val stringValue];
+    } @catch(...) {}
+
+    // 如果外面包了一层大壳子，直接钻进去拿
+    NSArray *wrappers = @[@"dataModel", @"feedModel", @"itemModel", @"searchResult"];
+    for (NSString *key in wrappers) {
         @try {
-            if ([obj respondsToSelector:NSSelectorFromString(key)]) {
-                id val = [obj valueForKey:key];
-                if (val) [self custom_findInfoIdsInObject:val intoSet:set visited:visited];
+            id val = [obj valueForKey:key];
+            if (val && val != obj) {
+                NSString *inner = [self custom_extractInfoId:val];
+                if (inner) return inner;
             }
-        } @catch(NSException *e){}
+        } @catch(...) {}
     }
+    return nil;
 }
 
-// 暴力刷新视图兜底方法
+// 暴力刷新视图
 %new
 - (void)custom_reloadCollectionView {
     NSMutableArray *queue = [NSMutableArray arrayWithObject:self.view];
     while (queue.count > 0) {
         UIView *currentView = queue.firstObject;
         [queue removeObjectAtIndex:0];
+        
         if ([currentView isKindOfClass:[UICollectionView class]]) [(UICollectionView *)currentView reloadData];
         else if ([currentView isKindOfClass:[UITableView class]]) [(UITableView *)currentView reloadData];
+        
         [queue addObjectsFromArray:currentView.subviews];
     }
 }
