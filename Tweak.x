@@ -7,12 +7,12 @@
 @property (copy, nonatomic) NSString *pageType;
 @end
 
-// 2. 声明转转真实详情网络请求代理类
-@interface ZZInfoDetailProxy : NSObject
-- (void)requestInfoDetailDatas:(id)req success:(void(^)(id response))succ failure:(void(^)(id error))fail;
+// 2. 声明真实详情网络请求代理类
+@interface ZZGoodsDetailProxy : NSObject
+- (void)requestGoodsDetailDateWithRequestModel:(id)a0 success:(void(^)(id response))a1 failure:(void(^)(id error))a2;
 @end
 
-// 3. 声明响应体，用于替换深层数据
+// 3. 声明响应体数据模型
 @interface ZZListingResponseModel : NSObject
 @property (retain, nonatomic) NSMutableArray *infos;
 @end
@@ -28,6 +28,7 @@
 // 自定义注入的方法
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture;
 - (void)custom_fetchDetailAndFilterWithVersion:(NSString *)version;
+- (BOOL)custom_isObject:(id)object matchTarget:(NSString *)target;
 - (void)custom_reloadCollectionView;
 @end
 
@@ -46,20 +47,19 @@
 
 %new
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture {
-    // 仅在手势刚识别时触发一次
     if (gesture.state == UIGestureRecognizerStateBegan) {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"系统版本深层筛选" 
-                                                                       message:@"请输入想筛选的iOS版本\n(将在后台并发拉取本页所有商品的详情进行精确匹配)" 
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"系统版本深度筛选" 
+                                                                       message:@"请输入想筛选的iOS版本\n(将深度解析列表标签并在后台拉取详情)" 
                                                                 preferredStyle:UIAlertControllerStyleAlert];
         
         [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
-            textField.placeholder = @"输入 iOS 版本号 (如: 15.4)";
+            textField.placeholder = @"输入版本号 (如: 15.4、16)";
             textField.keyboardType = UIKeyboardTypeNumbersAndPunctuation;
             textField.clearButtonMode = UITextFieldViewModeWhileEditing;
         }];
         
         __weak typeof(self) weakSelf = self;
-        UIAlertAction *confirmAction = [UIAlertAction actionWithTitle:@"开始静默筛选" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        UIAlertAction *confirmAction = [UIAlertAction actionWithTitle:@"开始筛选" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
             NSString *versionText = alert.textFields.firstObject.text;
             if (versionText.length > 0) {
                 [weakSelf custom_fetchDetailAndFilterWithVersion:versionText];
@@ -84,7 +84,7 @@
 
 %new
 - (void)custom_fetchDetailAndFilterWithVersion:(NSString *)version {
-    // 1. 多重保障：获取当前列表数据源
+    // 1. 获取当前列表数据源
     NSArray *currentData = self.dataArray;
     if (!currentData || currentData.count == 0) {
         if (self.firstPageResponseData) {
@@ -93,15 +93,15 @@
     }
     
     if (!currentData || currentData.count == 0) {
-        UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"提示" message:@"当前列表没有数据，请刷新或向下滑动后再试" preferredStyle:UIAlertControllerStyleAlert];
+        UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"提示" message:@"列表暂无数据，请刷新后重试" preferredStyle:UIAlertControllerStyleAlert];
         [emptyAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
         [self presentViewController:emptyAlert animated:YES completion:nil];
         return;
     }
     
-    // 2. 弹出 Loading 提示框，拦截用户操作
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在静默拉取详情..." 
-                                                                          message:@"后台正在并发拉取当前页所有商品的深层参数\n请稍候..." 
+    // 2. 弹出 Loading
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在静默拉取与分析..." 
+                                                                          message:@"后台正在处理当前页所有商品，请稍候..." 
                                                                    preferredStyle:UIAlertControllerStyleAlert];
     [self presentViewController:loadingAlert animated:YES completion:nil];
     
@@ -110,11 +110,11 @@
     NSMutableSet *matchedInfoIds = [NSMutableSet set];
     NSLock *lock = [[NSLock alloc] init];
     
-    // 4. 遍历当前商品，并发起真实详情网络请求
+    // 4. 遍历当前商品
     for (id item in currentData) {
         NSString *infoId = nil;
         @try { 
-            // 兼容 infoId 可能是 NSNumber 或 NSString 的情况
+            // 兼容 infoId 类型
             id val = [item valueForKey:@"infoId"];
             if ([val isKindOfClass:[NSNumber class]]) {
                 infoId = [(NSNumber *)val stringValue];
@@ -126,67 +126,35 @@
         if (!infoId || infoId.length == 0) {
             continue;
         }
-        
-        // 进入并发组
+
+        // ====== 核心改进 1：先进行深度本地搜索 ======
+        // 如果列表自带的标签、扩展字段里已经包含了版本号，直接跳过网络请求，极速处理！
+        if ([self custom_isObject:item matchTarget:version]) {
+            [lock lock];
+            [matchedInfoIds addObject:infoId];
+            [lock unlock];
+            continue;
+        }
+
+        // ====== 核心改进 2：本地没搜到，再并发去网络拉详情页 ======
         dispatch_group_enter(group);
         
-        // 构造转转真实的详情请求体
         ZZInfoDetailRequestModel *reqModel = [[NSClassFromString(@"ZZInfoDetailRequestModel") alloc] init];
         reqModel.infoID = infoId;
-        reqModel.from = 1;         // 模拟正常调用的参数
-        reqModel.pageType = @"1";
+        reqModel.from = 1; 
         
-        // 调用转转的真实网络代理发起请求
-        ZZInfoDetailProxy *proxy = [[NSClassFromString(@"ZZInfoDetailProxy") alloc] init];
-        [proxy requestInfoDetailDatas:reqModel success:^(id response) {
-            BOOL isMatch = NO;
-            @try {
-                // response 就是 ZZGoodsDetailModel
-                // 方案A：深度解析 param 数组里面的参数 (ZZGoodsDetailParamModel)
-                NSArray *params = [response valueForKey:@"param"];
-                if ([params isKindOfClass:[NSArray class]]) {
-                    for (id paramItem in params) {
-                        NSString *paramValue = [paramItem valueForKey:@"paramValue"];
-                        if ([paramValue isKindOfClass:[NSString class]] && [paramValue containsString:version]) {
-                            isMatch = YES;
-                            break;
-                        }
-                    }
-                }
-                
-                // 方案B：参数数组里没找到？去标题、正文、卖家描述里兜底找
-                if (!isMatch) {
-                    NSArray *keysToCheck = @[@"title", @"content", @"titleAndContent", @"sellerDescription", @"extend", @"userInfoDesc"];
-                    for (NSString *key in keysToCheck) {
-                        NSString *val = [response valueForKey:key];
-                        if ([val isKindOfClass:[NSString class]] && [val containsString:version]) {
-                            isMatch = YES;
-                            break;
-                        }
-                    }
-                }
-                
-                // 方案C：终极兜底，强转对象的字符串描述
-                if (!isMatch) {
-                    NSString *fullDesc = [response description];
-                    if ([fullDesc containsString:version]) {
-                        isMatch = YES;
-                    }
-                }
-            } @catch (NSException *e) {}
+        ZZGoodsDetailProxy *proxy = [[NSClassFromString(@"ZZGoodsDetailProxy") alloc] init];
+        [proxy requestGoodsDetailDateWithRequestModel:reqModel success:^(id response) {
             
-            // 如果成功匹配该版本，加入安全集合
-            if (isMatch) {
+            // 解析详情数据（也是用极深度的反解析方法）
+            if ([self custom_isObject:response matchTarget:version]) {
                 [lock lock];
                 [matchedInfoIds addObject:infoId];
                 [lock unlock];
             }
-            
-            // 离开并发组
             dispatch_group_leave(group);
             
         } failure:^(id error) {
-            // 请求失败也要离开并发组，防止死锁
             dispatch_group_leave(group);
         }];
     }
@@ -203,7 +171,7 @@
                 NSString *infoId = nil;
                 @try { 
                     id val = [item valueForKey:@"infoId"];
-                    if ([val isKindOfClass:[NSNumber class]]) infoId = [val stringValue];
+                    if ([val isKindOfClass:[NSNumber class]]) infoId = [(NSNumber *)val stringValue];
                     else if ([val isKindOfClass:[NSString class]]) infoId = val;
                 } @catch (NSException *e) {}
                 
@@ -213,27 +181,26 @@
             }
             
             if (sortedFilteredArray.count > 0) {
-                // 替换列表的数据源
+                // ====== 核心改进 3：深度替换并重载 ZZFLEX ======
                 weakSelf.dataArray = [sortedFilteredArray copy];
                 
-                // 因为转转使用的是 ZZFLEX 布局，必须深度替换 firstPageResponseData 中的数据
                 if (weakSelf.firstPageResponseData) {
                     @try {
                         [weakSelf.firstPageResponseData setValue:[sortedFilteredArray mutableCopy] forKey:@"infos"];
                     } @catch (NSException *e) {}
                 }
                 
-                // 调用转转官方的方法，触发 ZZFLEX 引擎重构整个 UI 列表！
+                // 触发转转 ZZFLEX 布局引擎重绘
                 if ([weakSelf respondsToSelector:@selector(reloadListingGoodsWithRespModel:)]) {
                     [weakSelf performSelector:@selector(reloadListingGoodsWithRespModel:) withObject:weakSelf.firstPageResponseData];
                 } else if ([weakSelf respondsToSelector:@selector(real_reloadData:)]) {
                     [weakSelf performSelector:@selector(real_reloadData:) withObject:nil];
                 } else {
-                    [weakSelf custom_reloadCollectionView]; // 兜底
+                    [weakSelf custom_reloadCollectionView]; // 暴力兜底
                 }
             } else {
                 UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"筛选结果为空" 
-                                                                                    message:@"刚才拉取了本页所有的商品详情，但均未发现该系统版本。\n请往下滑动加载下一页数据后，再次双指长按进行筛选。" 
+                                                                                    message:@"深层遍历了列表与详情页，均未发现该系统版本。\n请下拉加载更多后重试。" 
                                                                              preferredStyle:UIAlertControllerStyleAlert];
                 [emptyAlert addAction:[UIAlertAction actionWithTitle:@"好的" style:UIAlertActionStyleCancel handler:nil]];
                 [weakSelf presentViewController:emptyAlert animated:YES completion:nil];
@@ -242,7 +209,47 @@
     });
 }
 
-// 兜底刷新视图方法
+// ====== 核心改进 4：全知全能的深层文本匹配引擎 ======
+%new
+- (BOOL)custom_isObject:(id)object matchTarget:(NSString *)target {
+    if (!object || !target) return NO;
+    
+    @try {
+        // 方法 A：尝试将其转为字典 (利用转转内嵌的 MJExtension 库)
+        if ([object respondsToSelector:NSSelectorFromString(@"mj_keyValues")]) {
+            id dict = [object performSelector:NSSelectorFromString(@"mj_keyValues")];
+            if (dict && [[dict description] containsString:target]) {
+                return YES;
+            }
+        }
+        
+        // 方法 B：尝试将其转为字典 (利用转转内嵌的 YYModel 库)
+        if ([object respondsToSelector:NSSelectorFromString(@"yy_modelToJSONObject")]) {
+            id dict = [object performSelector:NSSelectorFromString(@"yy_modelToJSONObject")];
+            if (dict && [[dict description] containsString:target]) {
+                return YES;
+            }
+        }
+        
+        // 方法 C：直接提取常见字段兜底
+        NSArray *keys = @[@"title", @"desc", @"extendJson", @"userInfoLabelText", @"priceDesc", @"userCateLabelDesc", @"titleAndContent", @"sellerDescription"];
+        for (NSString *key in keys) {
+            id val = [object valueForKey:key];
+            if ([val isKindOfClass:[NSString class]] && [(NSString *)val containsString:target]) {
+                return YES;
+            }
+        }
+        
+        // 方法 D：原始描述强转兜底
+        if ([[object description] containsString:target]) {
+            return YES;
+        }
+    } @catch(NSException *e) {}
+    
+    return NO;
+}
+
+// 暴力刷新视图兜底方法
 %new
 - (void)custom_reloadCollectionView {
     NSMutableArray *queue = [NSMutableArray arrayWithObject:self.view];
