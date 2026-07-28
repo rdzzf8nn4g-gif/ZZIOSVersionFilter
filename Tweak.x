@@ -1,23 +1,25 @@
 #import <UIKit/UIKit.h>
 
-// ====== 消除 ARC 警告 ======
-@interface NSObject (ZZModelToJSON)
+// ====== 1. 声明转转官方和第三方的数据转换方法，消除 ARC 警告 ======
+@interface NSObject (ZZNativeDataConvert)
+- (id)modelToDictionary; // 转转官方自带的模型转字典神器
 - (id)mj_keyValues;
+- (id)yy_modelToJSONObject;
+- (id)responseString;
+- (id)responseJSONObject;
 @end
 
-// ====== 1. 声明转转的网络请求类 ======
+// ====== 2. 声明网络请求模型与代理 ======
 @interface ZZInfoDetailRequestModel : NSObject
 @property (copy, nonatomic) NSString *infoID;
 @property (nonatomic) unsigned long long from;
 @property (copy, nonatomic) NSString *pageType;
 @end
 
-// 闲置商品接口
 @interface ZZInfoDetailProxy : NSObject
 - (void)requestInfoDetailDatas:(id)req success:(void(^)(id response))success failure:(void(^)(id error))failure;
 @end
 
-// 验机精品接口
 @interface ZZGoodsDetailProxy : NSObject
 - (void)requestGoodsDetailDateWithRequestModel:(id)req success:(void(^)(id response))success failure:(void(^)(id error))failure;
 @end
@@ -26,17 +28,18 @@
 @property (retain, nonatomic) NSMutableArray *infos;
 @end
 
-// ====== 2. 声明列表控制器 ======
+// ====== 3. 声明列表控制器 ======
 @interface ZZListingAprilViewController : UIViewController
 @property (retain, nonatomic) NSArray *dataArray;
 @property (retain, nonatomic) ZZListingResponseModel *firstPageResponseData;
 - (void)loadData;
+- (void)reloadListingGoodsWithRespModel:(id)arg;
 
 // 自定义方法声明
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture;
 - (void)custom_filterWithVersion:(NSString *)version;
 - (NSString *)custom_extractInfoId:(id)obj;
-- (void)custom_extractAllStringsFrom:(id)obj into:(NSMutableString *)dump visited:(NSMutableSet *)visited depth:(int)depth;
+- (BOOL)custom_matchResponse:(id)response target:(NSString *)target;
 - (void)custom_reloadCollectionView;
 @end
 
@@ -56,8 +59,8 @@
 %new
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"系统版本核弹级检索" 
-                                                                       message:@"请输入想筛选的iOS版本\n(已搭载全域字符串粉碎机，无死角提取详情)" 
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"系统版本官方解析检索" 
+                                                                       message:@"请输入想筛选的iOS版本\n(已调用转转官方modelToDictionary引擎)" 
                                                                 preferredStyle:UIAlertControllerStyleAlert];
         
         [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
@@ -92,7 +95,7 @@
 
 %new
 - (void)custom_filterWithVersion:(NSString *)version {
-    // 1. 直击底层列表数据
+    // 1. 直击转转底层商品数据源
     if (!self.firstPageResponseData || ![self.firstPageResponseData respondsToSelector:NSSelectorFromString(@"infos")]) {
         return;
     }
@@ -100,8 +103,8 @@
     NSArray *infos = [self.firstPageResponseData valueForKey:@"infos"];
     if (!infos || infos.count == 0) return;
     
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"静默双路拉取中" 
-                                                                          message:@"正在将详情层层粉碎为纯文本进行绝对匹配..." 
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在静默并发拉取" 
+                                                                          message:@"后台已启动官方引擎解析详情，请稍候..." 
                                                                    preferredStyle:UIAlertControllerStyleAlert];
     [self presentViewController:loadingAlert animated:YES completion:nil];
     
@@ -109,12 +112,15 @@
     NSMutableSet *matchedInfoIds = [NSMutableSet set];
     NSLock *lock = [[NSLock alloc] init];
     
-    // 必须强引用代理对象！防止 ARC 销毁网络请求
+    // 强引用代理对象，防止 ARC 提前销毁
     NSMutableArray *retainedProxies = [NSMutableArray array];
     
     __block int matchCount = 0;
+    __block int reqSuccessCount = 0;
+    __block int reqFailCount = 0;
+    __block NSString *sampleStr = @""; // 取第一条数据用于诊断
     
-    // 目标文本标准化：全小写，去空格
+    // 清理输入的目标版本号 (转全小写 + 去空格)
     NSString *target = [[version lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
     
     Class ReqModelClass = NSClassFromString(@"ZZInfoDetailRequestModel");
@@ -125,13 +131,11 @@
         
         // 构造请求体
         id reqModel = [[ReqModelClass alloc] init];
-        [reqModel setValue:infoId forKey:@"infoID"]; // 大写的 infoID
+        [reqModel setValue:infoId forKey:@"infoID"];
         [reqModel setValue:@(1) forKey:@"from"];
         [reqModel setValue:@"1" forKey:@"pageType"];
         
-        // ============================================
-        // 路线 1：个人闲置接口 (ZZInfoDetailProxy)
-        // ============================================
+        // ====== 路线 1：C2C 个人商品接口 ======
         Class ProxyClassC2C = NSClassFromString(@"ZZInfoDetailProxy");
         if (ProxyClassC2C) {
             dispatch_group_enter(group);
@@ -142,24 +146,22 @@
                 #pragma clang diagnostic push
                 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                 [proxyC2C requestInfoDetailDatas:reqModel success:^(id response) {
+                    [lock lock]; reqSuccessCount++; [lock unlock];
                     
-                    // 【核心爆发点】将 response 对象彻底粉碎为一段纯文本
-                    NSMutableString *textDump = [NSMutableString string];
-                    NSMutableSet *visited = [NSMutableSet set];
-                    [self custom_extractAllStringsFrom:response into:textDump visited:visited depth:0];
-                    
-                    NSString *cleanDump = [[textDump lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
-                    
-                    if ([cleanDump containsString:target]) {
+                    if ([self custom_matchResponse:response target:target]) {
                         [lock lock];
                         if (![matchedInfoIds containsObject:infoId]) {
                             [matchedInfoIds addObject:infoId];
                             matchCount++;
                         }
                         [lock unlock];
+                    } else if (sampleStr.length == 0) {
+                        // 留底做诊断
+                        [lock lock]; sampleStr = [[response description] substringToIndex:MIN(500, [response description].length)]; [lock unlock];
                     }
                     dispatch_group_leave(group);
                 } failure:^(id error) {
+                    [lock lock]; reqFailCount++; [lock unlock];
                     dispatch_group_leave(group);
                 }];
                 #pragma clang diagnostic pop
@@ -168,9 +170,7 @@
             }
         }
         
-        // ============================================
-        // 路线 2：验机精品接口 (ZZGoodsDetailProxy)
-        // ============================================
+        // ====== 路线 2：B2C 验机精品接口 ======
         Class ProxyClassB2C = NSClassFromString(@"ZZGoodsDetailProxy");
         if (ProxyClassB2C) {
             dispatch_group_enter(group);
@@ -181,15 +181,9 @@
                 #pragma clang diagnostic push
                 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                 [proxyB2C requestGoodsDetailDateWithRequestModel:reqModel success:^(id response) {
+                    [lock lock]; reqSuccessCount++; [lock unlock];
                     
-                    // 【核心爆发点】将 response 对象彻底粉碎为一段纯文本
-                    NSMutableString *textDump = [NSMutableString string];
-                    NSMutableSet *visited = [NSMutableSet set];
-                    [self custom_extractAllStringsFrom:response into:textDump visited:visited depth:0];
-                    
-                    NSString *cleanDump = [[textDump lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
-                    
-                    if ([cleanDump containsString:target]) {
+                    if ([self custom_matchResponse:response target:target]) {
                         [lock lock];
                         if (![matchedInfoIds containsObject:infoId]) {
                             [matchedInfoIds addObject:infoId];
@@ -199,6 +193,7 @@
                     }
                     dispatch_group_leave(group);
                 } failure:^(id error) {
+                    [lock lock]; reqFailCount++; [lock unlock];
                     dispatch_group_leave(group);
                 }];
                 #pragma clang diagnostic pop
@@ -210,7 +205,7 @@
     
     __weak typeof(self) weakSelf = self;
     
-    // 5. 等待请求完成并更新 UI
+    // 5. 等待所有并发网络请求完成
     dispatch_group_notify(group, dispatch_get_main_queue(), ^{
         [loadingAlert dismissViewControllerAnimated:YES completion:^{
             
@@ -239,13 +234,13 @@
                     [weakSelf custom_reloadCollectionView]; // 兜底刷新
                 }
                 
-                NSString *resultMsg = [NSString stringWithFormat:@"全页扫描并验证完毕\n成功匹配命中: %d 个！", matchCount];
+                NSString *resultMsg = [NSString stringWithFormat:@"请求返回: %d 个\n匹配命中: %d 个", reqSuccessCount, matchCount];
                 UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"筛选成功" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                 [successAlert addAction:[UIAlertAction actionWithTitle:@"完美" style:UIAlertActionStyleDefault handler:nil]];
                 [weakSelf presentViewController:successAlert animated:YES completion:nil];
                 
             } else {
-                NSString *resultMsg = [NSString stringWithFormat:@"已将当前列表所有详情数据\n粉碎为纯文本检索，\n依然匹配到 0 个商品！\n请向下滑动加载下一页后再试。"];
+                NSString *resultMsg = [NSString stringWithFormat:@"请求返回: %d 个\n匹配命中: 0 个\n\n【服务器首条数据采样】:\n%@", reqSuccessCount, sampleStr.length > 0 ? sampleStr : @"获取为空"];
                 UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"未能筛到相关商品" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                 [emptyAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
                 [weakSelf presentViewController:emptyAlert animated:YES completion:nil];
@@ -254,70 +249,54 @@
     });
 }
 
-// ====== 核弹级武器：全域字符串粉碎机 ======
-// 把任何对象（字典、数组、模型）里面所有的文字提取出来，组合成一条超长的巨型文本！
+// ====== 终极降维打击：利用官方方法转 JSON 纯文本进行搜索 ======
 %new
-- (void)custom_extractAllStringsFrom:(id)obj into:(NSMutableString *)dump visited:(NSMutableSet *)visited depth:(int)depth {
-    if (!obj || depth > 6) return;
+- (BOOL)custom_matchResponse:(id)response target:(NSString *)target {
+    if (!response) return NO;
     
-    // 防循环引用崩溃
-    NSValue *ptr = [NSValue valueWithNonretainedObject:obj];
-    if ([visited containsObject:ptr]) return;
-    [visited addObject:ptr];
-    
-    if ([obj isKindOfClass:[NSString class]]) {
-        [dump appendString:(NSString *)obj];
-        [dump appendString:@"|"];
-        return;
-    }
-    
-    if ([obj isKindOfClass:[NSNumber class]]) {
-        [dump appendString:[(NSNumber *)obj stringValue]];
-        [dump appendString:@"|"];
-        return;
-    }
-    
-    if ([obj isKindOfClass:[NSArray class]]) {
-        for (id item in (NSArray *)obj) {
-            [self custom_extractAllStringsFrom:item into:dump visited:visited depth:depth+1];
-        }
-        return;
-    }
-    
-    if ([obj isKindOfClass:[NSDictionary class]]) {
-        for (id key in (NSDictionary *)obj) {
-            [self custom_extractAllStringsFrom:[(NSDictionary *)obj objectForKey:key] into:dump visited:visited depth:depth+1];
-        }
-        return;
-    }
-    
-    // 如果是自定义模型（商品详情 ZZGoodsDetailModel 或 ZZGoodsDetailParamModel 等）
+    NSString *rawJsonStr = nil;
     @try {
-        if ([obj respondsToSelector:@selector(mj_keyValues)]) {
+        id dict = nil;
+        // 1. 转转官方自带的模型转字典神器（最安全，最完整）
+        if ([response respondsToSelector:@selector(modelToDictionary)]) {
             #pragma clang diagnostic push
             #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            id dict = [obj performSelector:@selector(mj_keyValues)];
+            dict = [response performSelector:@selector(modelToDictionary)];
             #pragma clang diagnostic pop
-            
-            if (dict && [dict isKindOfClass:[NSDictionary class]]) {
-                [self custom_extractAllStringsFrom:dict into:dump visited:visited depth:depth+1];
+        }
+        // 2. 如果是网络框架请求体本身，拿 responseString
+        else if ([response respondsToSelector:@selector(responseString)]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            rawJsonStr = [response performSelector:@selector(responseString)];
+            #pragma clang diagnostic pop
+        }
+        // 3. 第三方兜底转换
+        else if ([response respondsToSelector:@selector(mj_keyValues)]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            dict = [response performSelector:@selector(mj_keyValues)];
+            #pragma clang diagnostic pop
+        }
+        
+        // 字典转纯文本 JSON
+        if (dict && [dict isKindOfClass:[NSDictionary class]]) {
+            NSData *jsonData = [NSJSONSerialization dataWithJSONObject:dict options:0 error:nil];
+            if (jsonData) {
+                rawJsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
             }
         }
-    } @catch(...) {}
-    
-    // 直接提取高概率存在的字段（双保险）
-    NSArray *commonKeys = @[@"paramValue", @"title", @"desc", @"content", @"sellerDescription", @"extendJson"];
-    for (NSString *key in commonKeys) {
-        if ([obj respondsToSelector:NSSelectorFromString(key)]) {
-            @try {
-                id val = [obj valueForKey:key];
-                if (val && [val isKindOfClass:[NSString class]]) {
-                    [dump appendString:(NSString *)val];
-                    [dump appendString:@"|"];
-                }
-            } @catch(...) {}
+        
+        // 终极匹配
+        if (rawJsonStr && rawJsonStr.length > 0) {
+            NSString *cleanJson = [[rawJsonStr lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
+            if ([cleanJson containsString:target]) {
+                return YES;
+            }
         }
-    }
+    } @catch (NSException *e) {}
+    
+    return NO;
 }
 
 // ====== 智能提取商品 ID ======
