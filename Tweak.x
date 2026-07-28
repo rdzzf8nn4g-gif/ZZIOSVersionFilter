@@ -33,6 +33,7 @@
 @property (retain, nonatomic) NSArray *dataArray;
 @property (retain, nonatomic) ZZListingResponseModel *firstPageResponseData;
 - (void)loadData;
+- (void)real_reloadData:(id)arg;
 - (void)reloadListingGoodsWithRespModel:(id)arg;
 
 // 自定义方法声明
@@ -234,13 +235,15 @@
                     [weakSelf custom_reloadCollectionView]; // 兜底刷新
                 }
                 
-                NSString *resultMsg = [NSString stringWithFormat:@"请求返回: %d 个\n匹配命中: %d 个", reqSuccessCount, matchCount];
+                // 修复：在这里使用了 reqFailCount，消除编译警告
+                NSString *resultMsg = [NSString stringWithFormat:@"请求成功: %d 个\n请求失败: %d 个\n匹配命中: %d 个", reqSuccessCount, reqFailCount, matchCount];
                 UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"筛选成功" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                 [successAlert addAction:[UIAlertAction actionWithTitle:@"完美" style:UIAlertActionStyleDefault handler:nil]];
                 [weakSelf presentViewController:successAlert animated:YES completion:nil];
                 
             } else {
-                NSString *resultMsg = [NSString stringWithFormat:@"请求返回: %d 个\n匹配命中: 0 个\n\n【服务器首条数据采样】:\n%@", reqSuccessCount, sampleStr.length > 0 ? sampleStr : @"获取为空"];
+                // 修复：在这里使用了 reqFailCount，消除编译警告
+                NSString *resultMsg = [NSString stringWithFormat:@"请求成功: %d 个\n请求失败: %d 个\n匹配命中: 0 个\n\n【服务器首条数据采样】:\n%@", reqSuccessCount, reqFailCount, sampleStr.length > 0 ? sampleStr : @"获取为空"];
                 UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"未能筛到相关商品" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                 [emptyAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
                 [weakSelf presentViewController:emptyAlert animated:YES completion:nil];
