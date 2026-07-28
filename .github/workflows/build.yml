@@ -1,51 +1,50 @@
-name: Build Theos Tweak
+name: Build AirDrop
 
-# 触发条件：推送到主分支，或者在 Actions 页面手动触发
 on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
-  workflow_dispatch: 
+  
+  workflow_dispatch:
 
 jobs:
   build:
-    name: Compile Tweak
-    runs-on: macos-latest # 必须使用 macOS runner，内置 Xcode 和 ldid 环境
-
+    name: Build iOS Tweak
+    runs-on: macos-14
     env:
-      # 指定 Theos 的环境变量路径
-      THEOS: ${{ github.workspace }}/theos
+      THEOS: ${{ github.workspace }}/theos 
 
     steps:
-      - name: 📥 检出代码
+      - name: 📥 检出代码 (Checkout Repository)
         uses: actions/checkout@v4
 
-      - name: 📦 缓存 Theos 环境
-        id: cache-theos
-        uses: actions/cache@v3
-        with:
-          path: ${{ github.workspace }}/theos
-          key: ${{ runner.os }}-theos-master
-          restore-keys: |
-            ${{ runner.os }}-theos-
-
-      - name: ⚙️ 安装 Theos 与 iOS SDKs
-        if: steps.cache-theos.outputs.cache-hit != 'true'
+      # ================= 新增这一步 =================
+      - name: 🔧 强制修复脚本权限 (Fix Permissions)
         run: |
-          echo ">>> 拉取 Theos 主分支..."
-          git clone --recursive https://github.com/theos/theos.git $THEOS
-          echo ">>> 拉取 iOS SDKs..."
+          mkdir -p layout/DEBIAN
+          chmod +x layout/DEBIAN/postinst
+          chmod +x layout/DEBIAN/postrm
+          chmod +x build.sh
+      # ==============================================
+
+      - name: ⚙️ 安装依赖 (Install Dependencies)
+        run: |
+          brew install ldid dpkg
+
+      - name: 🛠️ 配置 Theos 环境 (Setup Roothide Theos)
+        run: |
+          echo "Cloning Roothide Theos fork..."
+          git clone --recursive https://github.com/roothide/theos.git $THEOS
+
+      - name: 📦 下载 iOS SDK (Setup iOS SDKs)
+        run: |
+          echo "Cloning iOS SDKs..."
+          rm -rf $THEOS/sdks
           git clone https://github.com/theos/sdks.git $THEOS/sdks
 
-      - name: 🔨 运行编译脚本
+      - name: 🚀 运行编译脚本 (Run build.sh)
         run: |
-          chmod +x build.sh
           ./build.sh
 
-      - name: 📤 上传编译产物 (.deb)
+      - name: 📤 上传编译产物 (Upload Artifacts)
         uses: actions/upload-artifact@v4
         with:
-          name: ZZIOSVersionFilter-Packages
+          name: AirDrop-Packages
           path: packages/*.deb
-          if-no-files-found: error
