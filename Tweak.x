@@ -210,13 +210,15 @@
                     [weakSelf custom_reloadCollectionView];
                 }
                 
-                NSString *resultMsg = [NSString stringWithFormat:@"API 成功返回: %d 次\n嗅探验机报告网页: %d 次\n\n完美命中商品: %d 个", reqSuccessCount, webScrapeCount, matchCount];
+                // 修复点：将 webHitCount 用于输出显示，消除警告！
+                NSString *resultMsg = [NSString stringWithFormat:@"API 成功返回: %d 次\n嗅探验机网页: %d 次 (命中: %d次)\n\n最终保留商品: %d 个", reqSuccessCount, webScrapeCount, webHitCount, matchCount];
                 UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"筛选成功" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                 [successAlert addAction:[UIAlertAction actionWithTitle:@"完美" style:UIAlertActionStyleDefault handler:nil]];
                 [weakSelf presentViewController:successAlert animated:YES completion:nil];
                 
             } else {
-                NSString *resultMsg = [NSString stringWithFormat:@"API返回: %d次 | 嗅探网页: %d次\n匹配: 0 个\n\n【爬虫底层文字采样】:\n%@", reqSuccessCount, webScrapeCount, sampleResponseStr.length > 0 ? sampleResponseStr : @"空"];
+                // 修复点：将 webHitCount 用于输出显示，消除警告！
+                NSString *resultMsg = [NSString stringWithFormat:@"API返回: %d次\n网页嗅探: %d次 (命中: %d次)\n\n【爬虫底层文字采样】:\n%@", reqSuccessCount, webScrapeCount, webHitCount, sampleResponseStr.length > 0 ? sampleResponseStr : @"空"];
                 UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"未能筛到相关商品" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                 [emptyAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
                 [weakSelf presentViewController:emptyAlert animated:YES completion:nil];
@@ -237,20 +239,18 @@
     if ([obj isKindOfClass:[NSString class]]) {
         NSString *rawStr = (NSString *)obj;
         
-        // 尝试解除 URL 编码（解决 https%3A%2F%2F 这种被编码的链接）
+        // 尝试解除 URL 编码
         NSString *urlDecoded = [rawStr stringByRemovingPercentEncoding];
         if (urlDecoded) rawStr = urlDecoded;
         
         // ====== 特种部队：H5 验机报告爬虫 ======
-        // 只要这个文本里包含了验机报告的网址，我们就立刻下载这个网址的网页源码去搜版本号！
+        // 只要文本里包含了验机报告的网址，立刻下载这个网址的网页源码搜版本号！
         if ([rawStr containsString:@"http"] && ([rawStr containsString:@"uem/index.html"] || [rawStr containsString:@"/qc"] || [rawStr containsString:@"report"] || [rawStr containsString:@"detail"])) {
             
-            // 提取出真正的 http 链接
             NSRange httpRange = [rawStr rangeOfString:@"http"];
             NSString *urlPart = [rawStr substringFromIndex:httpRange.location];
             urlPart = [[urlPart componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\"' \n\r\t{}[]()<>"]] firstObject];
             
-            // 排除普通图片视频链接，只抓网页
             if (urlPart && urlPart.length > 10 && ![urlPart containsString:@".jpg"] && ![urlPart containsString:@".png"] && ![urlPart containsString:@".mp4"]) {
                 webCounters[0]++; // 抓取网页次数 + 1
                 
@@ -274,7 +274,7 @@
                         // 抓到了网页源码！暴力去空格匹配版本号
                         NSString *cleanWeb = [[webContent lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
                         
-                        // 有时候网页里的汉字和版本号是 unicode 编码（如 \u56fd）
+                        // 解码 HTML 内的 Unicode 汉字
                         NSString *unicodeDecodedWeb = [NSString stringWithCString:[cleanWeb cStringUsingEncoding:NSUTF8StringEncoding] encoding:NSNonLossyASCIIStringEncoding];
                         if (unicodeDecodedWeb) cleanWeb = unicodeDecodedWeb;
                         
