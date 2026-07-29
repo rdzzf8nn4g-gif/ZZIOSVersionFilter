@@ -4,6 +4,7 @@
 @interface NSObject (ZZNativeDataConvert)
 - (id)modelToDictionary;
 - (id)mj_keyValues;
+- (id)yy_modelToJSONObject;
 - (id)responseString;
 @end
 
@@ -17,11 +18,13 @@
 // C2C 接口
 @interface ZZInfoDetailProxy : NSObject
 - (void)requestInfoDetailDatas:(id)req success:(void(^)(id response))success failure:(void(^)(id error))failure;
+- (void)requestGetSupplementaryInfoWith:(id)req success:(void(^)(id response))success failure:(void(^)(id error))failure;
 @end
 
 // B2C 接口
 @interface ZZGoodsDetailProxy : NSObject
 - (void)requestGoodsDetailDateWithRequestModel:(id)req success:(void(^)(id response))success failure:(void(^)(id error))failure;
+- (void)requestGoodsDetailExtraDateWithRequestModel:(id)req success:(void(^)(id response))success failure:(void(^)(id error))failure;
 @end
 
 @interface ZZListingResponseModel : NSObject
@@ -50,7 +53,6 @@
 - (void)viewDidLoad {
     %orig;
     
-    // 注入双指长按手势
     UILongPressGestureRecognizer *twoFingerLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(custom_twoFingerLongPress:)];
     twoFingerLongPress.numberOfTouchesRequired = 2;
     twoFingerLongPress.minimumPressDuration = 1.0;
@@ -61,7 +63,7 @@
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"系统版本核弹级检索" 
-                                                                       message:@"请输入想筛选的iOS版本\n(已搭载全属性降维解析引擎)" 
+                                                                       message:@"请输入想筛选的iOS版本\n(已开启四路API齐发与全能解码引擎)" 
                                                                 preferredStyle:UIAlertControllerStyleAlert];
         
         [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
@@ -96,7 +98,6 @@
 
 %new
 - (void)custom_filterWithVersion:(NSString *)version {
-    // 1. 直击转转底层商品数据源
     if (!self.firstPageResponseData || ![self.firstPageResponseData respondsToSelector:NSSelectorFromString(@"infos")]) {
         return;
     }
@@ -104,8 +105,8 @@
     NSArray *infos = [self.firstPageResponseData valueForKey:@"infos"];
     if (!infos || infos.count == 0) return;
     
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在双路并发拉取" 
-                                                                          message:@"后台正在强力拆解详情模型，请稍候..." 
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在四路并发拉取" 
+                                                                          message:@"后台正在强力破解编码并拆解详情，请稍候..." 
                                                                    preferredStyle:UIAlertControllerStyleAlert];
     [self presentViewController:loadingAlert animated:YES completion:nil];
     
@@ -113,14 +114,14 @@
     NSMutableSet *matchedInfoIds = [NSMutableSet set];
     NSLock *lock = [[NSLock alloc] init];
     
-    // 强引用代理对象，防止 ARC 提前销毁
+    // 强引用代理对象
     NSMutableArray *retainedProxies = [NSMutableArray array];
     
     __block int matchCount = 0;
     __block int reqSuccessCount = 0;
     NSMutableString *sampleResponseStr = [[NSMutableString alloc] init];
     
-    // 清理输入的目标版本号 (转全小写 + 去空格)
+    // 目标文本标准化
     NSString *target = [[version lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
     Class ReqModelClass = NSClassFromString(@"ZZInfoDetailRequestModel");
     
@@ -134,67 +135,55 @@
         [reqModel setValue:@(1) forKey:@"from"];
         [reqModel setValue:@"1" forKey:@"pageType"];
         
-        // ====== 路线 1：C2C 个人商品接口 ======
+        // ====== 请求通用处理 Block ======
+        void (^handleResponse)(id) = ^(id response) {
+            [lock lock]; reqSuccessCount++; [lock unlock];
+            
+            BOOL isMatch = [self custom_matchResponse:response target:target sample:sampleResponseStr];
+            if (isMatch) {
+                [lock lock];
+                if (![matchedInfoIds containsObject:infoId]) {
+                    [matchedInfoIds addObject:infoId];
+                    matchCount++;
+                }
+                [lock unlock];
+            }
+            dispatch_group_leave(group);
+        };
+        
+        void (^handleFailure)(id) = ^(id error) {
+            dispatch_group_leave(group);
+        };
+        
+        // ====== 路线 1 & 2：C2C 接口 ======
         Class ProxyClassC2C = NSClassFromString(@"ZZInfoDetailProxy");
         if (ProxyClassC2C) {
-            dispatch_group_enter(group);
             id proxyC2C = [[ProxyClassC2C alloc] init];
             [retainedProxies addObject:proxyC2C];
             
             if ([proxyC2C respondsToSelector:@selector(requestInfoDetailDatas:success:failure:)]) {
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                [proxyC2C requestInfoDetailDatas:reqModel success:^(id response) {
-                    [lock lock]; 
-                    reqSuccessCount++; 
-                    
-                    BOOL isMatch = [self custom_matchResponse:response target:target sample:(sampleResponseStr.length == 0 ? sampleResponseStr : nil)];
-                    if (isMatch) {
-                        if (![matchedInfoIds containsObject:infoId]) {
-                            [matchedInfoIds addObject:infoId];
-                            matchCount++;
-                        }
-                    }
-                    [lock unlock];
-                    dispatch_group_leave(group);
-                } failure:^(id error) {
-                    dispatch_group_leave(group);
-                }];
-                #pragma clang diagnostic pop
-            } else {
-                dispatch_group_leave(group);
+                dispatch_group_enter(group);
+                [proxyC2C requestInfoDetailDatas:reqModel success:handleResponse failure:handleFailure];
+            }
+            if ([proxyC2C respondsToSelector:@selector(requestGetSupplementaryInfoWith:success:failure:)]) {
+                dispatch_group_enter(group);
+                [proxyC2C requestGetSupplementaryInfoWith:reqModel success:handleResponse failure:handleFailure];
             }
         }
         
-        // ====== 路线 2：B2C 验机精品接口 ======
+        // ====== 路线 3 & 4：B2C 接口 ======
         Class ProxyClassB2C = NSClassFromString(@"ZZGoodsDetailProxy");
         if (ProxyClassB2C) {
-            dispatch_group_enter(group);
             id proxyB2C = [[ProxyClassB2C alloc] init];
             [retainedProxies addObject:proxyB2C];
             
             if ([proxyB2C respondsToSelector:@selector(requestGoodsDetailDateWithRequestModel:success:failure:)]) {
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                [proxyB2C requestGoodsDetailDateWithRequestModel:reqModel success:^(id response) {
-                    [lock lock]; 
-                    reqSuccessCount++; 
-                    
-                    BOOL isMatch = [self custom_matchResponse:response target:target sample:(sampleResponseStr.length == 0 ? sampleResponseStr : nil)];
-                    if (isMatch) {
-                        if (![matchedInfoIds containsObject:infoId]) {
-                            [matchedInfoIds addObject:infoId];
-                            matchCount++;
-                        }
-                    }
-                    [lock unlock];
-                    dispatch_group_leave(group);
-                } failure:^(id error) {
-                    dispatch_group_leave(group);
-                }];
-                #pragma clang diagnostic pop
-            } else {
-                dispatch_group_leave(group);
+                dispatch_group_enter(group);
+                [proxyB2C requestGoodsDetailDateWithRequestModel:reqModel success:handleResponse failure:handleFailure];
+            }
+            if ([proxyB2C respondsToSelector:@selector(requestGoodsDetailExtraDateWithRequestModel:success:failure:)]) {
+                dispatch_group_enter(group);
+                [proxyB2C requestGoodsDetailExtraDateWithRequestModel:reqModel success:handleResponse failure:handleFailure];
             }
         }
     }
@@ -216,26 +205,24 @@
                     }
                 }
                 
-                // 替换掉转转底层的数据源
                 [weakSelf.firstPageResponseData setValue:filteredInfos forKey:@"infos"];
                 
-                // 强制 ZZFLEX 布局引擎重绘
                 if ([weakSelf respondsToSelector:NSSelectorFromString(@"reloadListingGoodsWithRespModel:")]) {
                     #pragma clang diagnostic push
                     #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                     [weakSelf performSelector:NSSelectorFromString(@"reloadListingGoodsWithRespModel:") withObject:weakSelf.firstPageResponseData];
                     #pragma clang diagnostic pop
                 } else {
-                    [weakSelf custom_reloadCollectionView]; // 兜底刷新
+                    [weakSelf custom_reloadCollectionView];
                 }
                 
-                NSString *resultMsg = [NSString stringWithFormat:@"请求成功: %d 个\n匹配命中: %d 个", reqSuccessCount, matchCount];
+                NSString *resultMsg = [NSString stringWithFormat:@"接口全通返回: %d 次\n筛选匹配命中: %d 个", reqSuccessCount, matchCount];
                 UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"筛选成功" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                 [successAlert addAction:[UIAlertAction actionWithTitle:@"完美" style:UIAlertActionStyleDefault handler:nil]];
                 [weakSelf presentViewController:successAlert animated:YES completion:nil];
                 
             } else {
-                NSString *resultMsg = [NSString stringWithFormat:@"请求成功: %d 个\n匹配命中: 0 个\n\n【服务器数据采样】:\n%@", reqSuccessCount, sampleResponseStr.length > 0 ? sampleResponseStr : @"解析为空"];
+                NSString *resultMsg = [NSString stringWithFormat:@"接口全通返回: %d 次\n匹配命中: 0 个\n\n【服务器最终解密采样】:\n%@", reqSuccessCount, sampleResponseStr.length > 0 ? sampleResponseStr : @"解析为空"];
                 UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"未能筛到相关商品" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                 [emptyAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
                 [weakSelf presentViewController:emptyAlert animated:YES completion:nil];
@@ -244,7 +231,7 @@
     });
 }
 
-// ====== 终极降维打击：利用官方方法转字典 + Description 进行解析 ======
+// ====== 终极降维打击：全能解码引擎 ======
 %new
 - (BOOL)custom_matchResponse:(id)response target:(NSString *)target sample:(NSMutableString *)sampleStr {
     if (!response) return NO;
@@ -252,74 +239,51 @@
     NSString *rawStr = nil;
     @try {
         id dict = nil;
-        // 1. mj_keyValues 会深度递归，把包含的所有子模型全部变成干净的字典！
-        if ([response respondsToSelector:@selector(mj_keyValues)]) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            dict = [response performSelector:@selector(mj_keyValues)];
-            #pragma clang diagnostic pop
-        }
-        
-        // 2. 转转官方方法兜底
-        if (!dict && [response respondsToSelector:@selector(modelToDictionary)]) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        if ([response respondsToSelector:@selector(modelToDictionary)]) {
             dict = [response performSelector:@selector(modelToDictionary)];
-            #pragma clang diagnostic pop
+        }
+        if (!dict && [response respondsToSelector:@selector(mj_keyValues)]) {
+            dict = [response performSelector:@selector(mj_keyValues)];
+        }
+        if (!dict && [response respondsToSelector:@selector(yy_modelToJSONObject)]) {
+            dict = [response performSelector:@selector(yy_modelToJSONObject)];
         }
         
-        // 核心突破点：直接使用字典自带的 description，它会把里面所有的嵌套内容原封不动打印成文本！
+        // 提取文本描述
         if (dict) {
             rawStr = [dict description];
         } else if ([response respondsToSelector:@selector(responseString)]) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             rawStr = [response performSelector:@selector(responseString)];
-            #pragma clang diagnostic pop
         } else {
             rawStr = [response description];
         }
         
-        // 保存一条样本用于弹窗诊断
-        if (sampleStr && rawStr.length > 0) {
+        if (!rawStr || rawStr.length == 0) return NO;
+
+        // ====== 核心：强力解除 Unicode 和 URL 编码的伪装 ======
+        // 1. 将 \Uxxxx (例如 \U53cd\U9988) 转换为真实汉字
+        NSString *unicodeDecoded = [NSString stringWithCString:[rawStr cStringUsingEncoding:NSUTF8StringEncoding] encoding:NSNonLossyASCIIStringEncoding];
+        if (unicodeDecoded) {
+            rawStr = unicodeDecoded;
+        }
+        
+        // 2. 将 %xx (例如 %E8%8B%B9) URL 编码转换为真实汉字/符号
+        NSString *urlDecoded = [rawStr stringByRemovingPercentEncoding];
+        if (urlDecoded) {
+            rawStr = urlDecoded;
+        }
+
+        // 保存一条解密最完善的样本用于弹窗诊断
+        if (sampleStr && sampleStr.length == 0 && rawStr.length > 0) {
             [sampleStr appendString:(rawStr.length > 500 ? [rawStr substringToIndex:500] : rawStr)];
         }
         
-        // ====== 第一层匹配：全文检索 ======
-        if (rawStr && rawStr.length > 0) {
-            NSString *cleanStr = [[rawStr lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
-            if ([cleanStr containsString:target]) {
-                return YES;
-            }
+        // ====== 全量暴力比对 ======
+        NSString *cleanStr = [[rawStr lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
+        if ([cleanStr containsString:target]) {
+            return YES;
         }
         
-        // ====== 第二层匹配：专门针对转转的验机详情模型 (对付 ZZGoodsDetailParamModel 等) ======
-        NSArray *possibleKeys = @[@"title", @"content", @"sellerDescription", @"extendJson", @"param", @"extraData", @"operatingContent", @"serviceInfo", @"qualityDes", @"overview"];
-        for (NSString *key in possibleKeys) {
-            if ([response respondsToSelector:NSSelectorFromString(key)]) {
-                id val = [response valueForKey:key];
-                if (val) {
-                    // 如果它是一个数组（比如验机报告各项参数），钻进去提取 paramValue
-                    if ([val isKindOfClass:[NSArray class]]) {
-                        for (id item in (NSArray *)val) {
-                            if ([item respondsToSelector:NSSelectorFromString(@"paramValue")]) {
-                                NSString *pVal = [[item valueForKey:@"paramValue"] description];
-                                if (pVal && [[[pVal lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""] containsString:target]) {
-                                    return YES;
-                                }
-                            }
-                        }
-                    }
-                    
-                    // 获取值的描述
-                    NSString *valDesc = [[val description] lowercaseString];
-                    valDesc = [valDesc stringByReplacingOccurrencesOfString:@" " withString:@""];
-                    if ([valDesc containsString:target]) {
-                        return YES;
-                    }
-                }
-            }
-        }
     } @catch (NSException *e) {}
     
     return NO;
