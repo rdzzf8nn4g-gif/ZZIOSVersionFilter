@@ -21,12 +21,12 @@
 @property (retain, nonatomic) NSArray *dataArray;
 @property (retain, nonatomic) ZZListingResponseModel *firstPageResponseData;
 - (void)loadData;
-- (void)real_reloadData:(id)arg;
 - (void)reloadListingGoodsWithRespModel:(id)arg;
 
 // 自定义方法声明
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture;
 - (void)custom_filterWithVersion:(NSString *)version;
+- (id)custom_createSafeReqModel:(NSString *)infoId preferClass:(NSString *)preferClass;
 - (void)custom_collectProductsFrom:(id)obj into:(NSMutableDictionary *)dict;
 - (NSString *)custom_extractInfoId:(id)obj;
 - (BOOL)custom_deepTextSearch:(id)obj target:(NSString *)target visited:(NSMutableSet *)visited depth:(int)depth sample:(NSMutableString *)sampleStr;
@@ -48,7 +48,7 @@
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"系统版本全网段检索" 
-                                                                       message:@"请输入想筛选的iOS版本\n(已搭载万能字典注入与全接口轰炸引擎)" 
+                                                                       message:@"请输入想筛选的iOS版本\n(已搭载动态模型注入引擎，绝对防闪退)" 
                                                                 preferredStyle:UIAlertControllerStyleAlert];
         
         [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
@@ -85,13 +85,13 @@
 - (void)custom_filterWithVersion:(NSString *)version {
     if (!self.dataArray || self.dataArray.count == 0) return;
     
-    // 递归收集你划出来的、屏幕上加载过的所有商品
+    // 递归收集屏幕上加载过的所有商品
     NSMutableDictionary *allProducts = [NSMutableDictionary dictionary];
     [self custom_collectProductsFrom:self.dataArray into:allProducts];
     
     if (allProducts.count == 0) return;
     
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在全接口轰炸扫描" 
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在动态注入提取" 
                                                                           message:[NSString stringWithFormat:@"已锁定 %lu 个商品，正在跨接口挖掘验机报告...", (unsigned long)allProducts.count]
                                                                    preferredStyle:UIAlertControllerStyleAlert];
     [self presentViewController:loadingAlert animated:YES completion:nil];
@@ -113,7 +113,7 @@
     for (NSString *infoId in allProducts.allKeys) {
         id item = allProducts[infoId];
         
-        // ====== 1. 本地扫描 (找C2C闲置卖家自己写的版本) ======
+        // ====== 1. 本地扫描 ======
         NSMutableSet *visited = [NSMutableSet set];
         if ([self custom_deepTextSearch:item target:target visited:visited depth:0 sample:sampleResponseStr]) {
             [matchedInfoIds addObject:infoId];
@@ -121,15 +121,7 @@
             continue;
         }
         
-        // ====== 2. 黑客级万能字典传参 (绕过模型验证，兼容所有接口) ======
-        NSMutableDictionary *uniReq = [NSMutableDictionary dictionary];
-        uniReq[@"infoID"] = infoId;
-        uniReq[@"infoId"] = infoId;
-        uniReq[@"goodsId"] = infoId;
-        uniReq[@"goodsID"] = infoId;
-        uniReq[@"from"] = @(1);
-        uniReq[@"pageType"] = @"1";
-        
+        // 通用回调
         void (^handleResponse)(id) = ^(id response) {
             [lock lock]; netReqCount++; [lock unlock];
             
@@ -152,41 +144,37 @@
             dispatch_group_leave(group);
         };
         
-        // ====== 3. 暴力穷举所有可能的详情与验机接口 ======
-        NSArray *proxyClassNames = @[
-            @"ZZInfoDetailProxy", 
-            @"ZZGoodsDetailProxy", 
-            @"ZZQcReportProxy", 
-            @"ZZQualityControlProxy", 
-            @"ZZGoodsReportProxy"
-        ];
+        // ====== 2. C2C 接口轰炸 ======
+        Class ProxyClassC2C = NSClassFromString(@"ZZInfoDetailProxy");
+        if (ProxyClassC2C) {
+            id proxyC2C = [[ProxyClassC2C alloc] init];
+            [retainedProxies addObject:proxyC2C];
+            id reqC2C = [self custom_createSafeReqModel:infoId preferClass:@"ZZInfoDetailRequestModel"];
+            
+            if (reqC2C && [proxyC2C respondsToSelector:@selector(requestInfoDetailDatas:success:failure:)]) {
+                dispatch_group_enter(group);
+                [proxyC2C requestInfoDetailDatas:reqC2C success:handleResponse failure:handleFailure];
+            }
+            if (reqC2C && [proxyC2C respondsToSelector:@selector(requestGetSupplementaryInfoWith:success:failure:)]) {
+                dispatch_group_enter(group);
+                [proxyC2C requestGetSupplementaryInfoWith:reqC2C success:handleResponse failure:handleFailure];
+            }
+        }
         
-        for (NSString *proxyName in proxyClassNames) {
-            Class ProxyCls = NSClassFromString(proxyName);
-            if (!ProxyCls) continue;
+        // ====== 3. B2C 验机接口轰炸 ======
+        Class ProxyClassB2C = NSClassFromString(@"ZZGoodsDetailProxy");
+        if (ProxyClassB2C) {
+            id proxyB2C = [[ProxyClassB2C alloc] init];
+            [retainedProxies addObject:proxyB2C];
+            id reqB2C = [self custom_createSafeReqModel:infoId preferClass:@"ZZGoodsDetailRequestModel"];
             
-            id proxy = [[ProxyCls alloc] init];
-            [retainedProxies addObject:proxy];
-            
-            // 轰炸方法1
-            if ([proxy respondsToSelector:@selector(requestInfoDetailDatas:success:failure:)]) {
+            if (reqB2C && [proxyB2C respondsToSelector:@selector(requestGoodsDetailDateWithRequestModel:success:failure:)]) {
                 dispatch_group_enter(group);
-                [proxy requestInfoDetailDatas:uniReq success:handleResponse failure:handleFailure];
+                [proxyB2C requestGoodsDetailDateWithRequestModel:reqB2C success:handleResponse failure:handleFailure];
             }
-            // 轰炸方法2
-            if ([proxy respondsToSelector:@selector(requestGetSupplementaryInfoWith:success:failure:)]) {
+            if (reqB2C && [proxyB2C respondsToSelector:@selector(requestGoodsDetailExtraDateWithRequestModel:success:failure:)]) {
                 dispatch_group_enter(group);
-                [proxy requestGetSupplementaryInfoWith:uniReq success:handleResponse failure:handleFailure];
-            }
-            // 轰炸方法3
-            if ([proxy respondsToSelector:@selector(requestGoodsDetailDateWithRequestModel:success:failure:)]) {
-                dispatch_group_enter(group);
-                [proxy requestGoodsDetailDateWithRequestModel:uniReq success:handleResponse failure:handleFailure];
-            }
-            // 轰炸方法4
-            if ([proxy respondsToSelector:@selector(requestGoodsDetailExtraDateWithRequestModel:success:failure:)]) {
-                dispatch_group_enter(group);
-                [proxy requestGoodsDetailExtraDateWithRequestModel:uniReq success:handleResponse failure:handleFailure];
+                [proxyB2C requestGoodsDetailExtraDateWithRequestModel:reqB2C success:handleResponse failure:handleFailure];
             }
         }
     }
@@ -219,6 +207,29 @@
             }
         }];
     });
+}
+
+// ====== 动态安全请求模型生成器（绝对防闪退） ======
+%new
+- (id)custom_createSafeReqModel:(NSString *)infoId preferClass:(NSString *)preferClass {
+    Class Cls = NSClassFromString(preferClass);
+    if (!Cls) {
+        Cls = NSClassFromString(@"ZZInfoDetailRequestModel"); // 兜底模型
+    }
+    if (!Cls) return nil;
+    
+    id req = [[Cls alloc] init];
+    if (!req) return nil;
+    
+    // 使用 KVC 强行注入，并套上 @try 彻底防止不存在属性导致的崩溃
+    @try { [req setValue:infoId forKey:@"infoID"]; } @catch(...) {}
+    @try { [req setValue:infoId forKey:@"infoId"]; } @catch(...) {}
+    @try { [req setValue:infoId forKey:@"goodsID"]; } @catch(...) {}
+    @try { [req setValue:infoId forKey:@"goodsId"]; } @catch(...) {}
+    @try { [req setValue:@(1) forKey:@"from"]; } @catch(...) {}
+    @try { [req setValue:@"1" forKey:@"pageType"]; } @catch(...) {}
+    
+    return req;
 }
 
 // ====== 递归提取列表中的所有商品 ======
