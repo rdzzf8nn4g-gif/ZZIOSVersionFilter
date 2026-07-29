@@ -1,5 +1,11 @@
 #import <UIKit/UIKit.h>
-#import <objc/runtime.h>
+
+// ====== 消除 ARC 警告，声明转字典方法 ======
+@interface NSObject (ZZNativeDataConvert)
+- (id)yy_modelToJSONObject;
+- (id)mj_keyValues;
+- (id)modelToDictionary;
+@end
 
 // ====== 1. 声明转转的网络请求类 ======
 @interface ZZInfoDetailRequestModel : NSObject
@@ -8,15 +14,14 @@
 @property (copy, nonatomic) NSString *pageType;
 @end
 
-// C2C 与 B2C 接口
+// C2C 接口
 @interface ZZInfoDetailProxy : NSObject
 - (void)requestInfoDetailDatas:(id)req success:(void(^)(id response))success failure:(void(^)(id error))failure;
-- (void)requestGetSupplementaryInfoWith:(id)req success:(void(^)(id response))success failure:(void(^)(id error))failure;
 @end
 
+// B2C 接口
 @interface ZZGoodsDetailProxy : NSObject
 - (void)requestGoodsDetailDateWithRequestModel:(id)req success:(void(^)(id response))success failure:(void(^)(id error))failure;
-- (void)requestGoodsDetailExtraDateWithRequestModel:(id)req success:(void(^)(id response))success failure:(void(^)(id error))failure;
 @end
 
 @interface ZZListingResponseModel : NSObject
@@ -35,9 +40,11 @@
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture;
 - (void)custom_filterWithVersion:(NSString *)version;
 - (NSString *)custom_extractInfoId:(id)obj;
-- (BOOL)custom_deepTextSearch:(id)obj target:(NSString *)target visited:(NSMutableSet *)visited depth:(int)depth sample:(NSMutableString *)sampleStr webCounters:(int *)webCounters;
+- (NSString *)custom_forceStringify:(id)obj;
+- (void)custom_pruneZZFLEXArray:(NSMutableArray *)array matchedIds:(NSSet *)matchedIds kept:(int *)kept removed:(int *)removed;
 - (void)custom_reloadCollectionView;
 @end
+
 
 %hook ZZListingAprilViewController
 
@@ -53,8 +60,8 @@
 %new
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"系统版本究极检索" 
-                                                                       message:@"请输入想筛选的iOS版本\n(已挂载H5验机报告穿透引擎)" 
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"系统版本核弹级检索" 
+                                                                       message:@"请输入想筛选的iOS版本\n(已挂载 YYModel 降维压扁引擎)" 
                                                                 preferredStyle:UIAlertControllerStyleAlert];
         
         [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
@@ -96,129 +103,127 @@
     NSArray *infos = [self.firstPageResponseData valueForKey:@"infos"];
     if (!infos || infos.count == 0) return;
     
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在全网段拉取" 
-                                                                          message:@"后台已开启 API 并发与 H5 验机报告嗅探，请稍候..." 
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在核弹级搜索" 
+                                                                          message:@"正在将底层对象通过 YYModel 强制降维..." 
                                                                    preferredStyle:UIAlertControllerStyleAlert];
     [self presentViewController:loadingAlert animated:YES completion:nil];
     
-    dispatch_group_t group = dispatch_group_create();
+    NSString *target = [[version lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
     NSMutableSet *matchedInfoIds = [NSMutableSet set];
-    NSLock *lock = [[NSLock alloc] init];
+    NSMutableString *sampleStr = [[NSMutableString alloc] init];
     
+    int localMatchCount = 0;
+    
+    // ====== 1. 本地 UI 模型强行降维提取 (解决“列表有却搜不到”的问题) ======
+    for (id item in infos) {
+        NSString *infoId = [self custom_extractInfoId:item];
+        if (!infoId || infoId.length < 4) continue;
+        
+        // 压扁对象为纯文本
+        NSString *localStr = [self custom_forceStringify:item];
+        
+        // 采集一段文本用来弹窗看效果
+        if (sampleStr.length < 600 && localStr.length > 0) {
+            [sampleStr appendFormat:@"[%@] ", localStr];
+        }
+        
+        if ([localStr containsString:target]) {
+            [matchedInfoIds addObject:infoId];
+            localMatchCount++;
+        }
+    }
+    
+    // ====== 2. 网络请求兜底 (如果本地标签没写全，去详情页抓) ======
+    dispatch_group_t group = dispatch_group_create();
+    NSLock *lock = [[NSLock alloc] init];
     NSMutableArray *retainedProxies = [NSMutableArray array];
     
-    __block int matchCount = 0;
-    __block int reqSuccessCount = 0;
-    __block int webScrapeCount = 0;
-    __block int webHitCount = 0;
-    NSMutableString *sampleResponseStr = [[NSMutableString alloc] init];
+    __block int netReqCount = 0;
+    __block int netMatchCount = 0;
     
-    // 目标文本标准化：全小写 + 去空格
-    NSString *target = [[version lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
     Class ReqModelClass = NSClassFromString(@"ZZInfoDetailRequestModel");
     
     for (id item in infos) {
         NSString *infoId = [self custom_extractInfoId:item];
         if (!infoId || infoId.length < 4) continue;
+        if ([matchedInfoIds containsObject:infoId]) continue; // 已经本地命中了就不发请求了
         
         id reqModel = [[ReqModelClass alloc] init];
         [reqModel setValue:infoId forKey:@"infoID"];
         [reqModel setValue:@(1) forKey:@"from"];
         [reqModel setValue:@"1" forKey:@"pageType"];
         
-        // 通用回调处理
-        void (^handleResponse)(id) = ^(id response) {
-            [lock lock]; reqSuccessCount++; [lock unlock];
-            
-            NSMutableSet *visited = [NSMutableSet set];
-            int localWebCounters[2] = {0, 0}; // 0: 抓取网页次数, 1: 网页命中次数
-            
-            BOOL isMatch = [self custom_deepTextSearch:response target:target visited:visited depth:0 sample:sampleResponseStr webCounters:localWebCounters];
-            
-            [lock lock];
-            webScrapeCount += localWebCounters[0];
-            webHitCount += localWebCounters[1];
-            if (isMatch) {
-                if (![matchedInfoIds containsObject:infoId]) {
-                    [matchedInfoIds addObject:infoId];
-                    matchCount++;
-                }
-            }
-            [lock unlock];
-            dispatch_group_leave(group);
-        };
-        
-        void (^handleFailure)(id) = ^(id error) {
-            dispatch_group_leave(group);
-        };
-        
-        // ====== 路线 1 & 2：C2C 接口 ======
+        // 路线 1: C2C
         Class ProxyClassC2C = NSClassFromString(@"ZZInfoDetailProxy");
         if (ProxyClassC2C) {
             id proxyC2C = [[ProxyClassC2C alloc] init];
             [retainedProxies addObject:proxyC2C];
             if ([proxyC2C respondsToSelector:@selector(requestInfoDetailDatas:success:failure:)]) {
                 dispatch_group_enter(group);
-                [proxyC2C requestInfoDetailDatas:reqModel success:handleResponse failure:handleFailure];
-            }
-            if ([proxyC2C respondsToSelector:@selector(requestGetSupplementaryInfoWith:success:failure:)]) {
-                dispatch_group_enter(group);
-                [proxyC2C requestGetSupplementaryInfoWith:reqModel success:handleResponse failure:handleFailure];
+                [proxyC2C requestInfoDetailDatas:reqModel success:^(id response) {
+                    [lock lock]; netReqCount++; [lock unlock];
+                    NSString *netStr = [self custom_forceStringify:response];
+                    if ([netStr containsString:target]) {
+                        [lock lock];
+                        if (![matchedInfoIds containsObject:infoId]) {
+                            [matchedInfoIds addObject:infoId];
+                            netMatchCount++;
+                        }
+                        [lock unlock];
+                    }
+                    dispatch_group_leave(group);
+                } failure:^(id error) { dispatch_group_leave(group); }];
             }
         }
         
-        // ====== 路线 3 & 4：B2C 接口 ======
+        // 路线 2: B2C 验机
         Class ProxyClassB2C = NSClassFromString(@"ZZGoodsDetailProxy");
         if (ProxyClassB2C) {
             id proxyB2C = [[ProxyClassB2C alloc] init];
             [retainedProxies addObject:proxyB2C];
             if ([proxyB2C respondsToSelector:@selector(requestGoodsDetailDateWithRequestModel:success:failure:)]) {
                 dispatch_group_enter(group);
-                [proxyB2C requestGoodsDetailDateWithRequestModel:reqModel success:handleResponse failure:handleFailure];
-            }
-            if ([proxyB2C respondsToSelector:@selector(requestGoodsDetailExtraDateWithRequestModel:success:failure:)]) {
-                dispatch_group_enter(group);
-                [proxyB2C requestGoodsDetailExtraDateWithRequestModel:reqModel success:handleResponse failure:handleFailure];
+                [proxyB2C requestGoodsDetailDateWithRequestModel:reqModel success:^(id response) {
+                    [lock lock]; netReqCount++; [lock unlock];
+                    NSString *netStr = [self custom_forceStringify:response];
+                    if ([netStr containsString:target]) {
+                        [lock lock];
+                        if (![matchedInfoIds containsObject:infoId]) {
+                            [matchedInfoIds addObject:infoId];
+                            netMatchCount++;
+                        }
+                        [lock unlock];
+                    }
+                    dispatch_group_leave(group);
+                } failure:^(id error) { dispatch_group_leave(group); }];
             }
         }
     }
     
     __weak typeof(self) weakSelf = self;
     
-    // 5. 等待所有请求和网页爬取完成
+    // 3. 所有任务执行完毕，清理 ZZFLEX 列表
     dispatch_group_notify(group, dispatch_get_main_queue(), ^{
         [loadingAlert dismissViewControllerAnimated:YES completion:^{
             [retainedProxies removeAllObjects];
             
-            if (matchCount > 0) {
-                NSMutableArray *filteredInfos = [NSMutableArray array];
-                for (id item in infos) {
-                    NSString *infoId = [weakSelf custom_extractInfoId:item];
-                    if (infoId && [matchedInfoIds containsObject:infoId]) {
-                        [filteredInfos addObject:item];
-                    }
-                }
+            if (matchedInfoIds.count > 0) {
+                // 直接修剪屏幕驱动器 dataArray 里的无用商品
+                int kept = 0, removed = 0;
+                NSMutableArray *mutDataArray = [weakSelf.dataArray mutableCopy];
+                [weakSelf custom_pruneZZFLEXArray:mutDataArray matchedIds:matchedInfoIds kept:&kept removed:&removed];
+                weakSelf.dataArray = mutDataArray;
                 
-                [weakSelf.firstPageResponseData setValue:filteredInfos forKey:@"infos"];
+                // 强制重绘列表
+                [weakSelf custom_reloadCollectionView];
                 
-                if ([weakSelf respondsToSelector:NSSelectorFromString(@"reloadListingGoodsWithRespModel:")]) {
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    [weakSelf performSelector:NSSelectorFromString(@"reloadListingGoodsWithRespModel:") withObject:weakSelf.firstPageResponseData];
-                    #pragma clang diagnostic pop
-                } else {
-                    [weakSelf custom_reloadCollectionView];
-                }
-                
-                // 修复点：将 webHitCount 用于输出显示，消除警告！
-                NSString *resultMsg = [NSString stringWithFormat:@"API 成功返回: %d 次\n嗅探验机网页: %d 次 (命中: %d次)\n\n最终保留商品: %d 个", reqSuccessCount, webScrapeCount, webHitCount, matchCount];
+                NSString *resultMsg = [NSString stringWithFormat:@"本地UI命中: %d 个\n网络详情命中: %d 个\n\n成功为您保留 %d 个匹配商品！", localMatchCount, netMatchCount, kept];
                 UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"筛选成功" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                 [successAlert addAction:[UIAlertAction actionWithTitle:@"完美" style:UIAlertActionStyleDefault handler:nil]];
                 [weakSelf presentViewController:successAlert animated:YES completion:nil];
                 
             } else {
-                // 修复点：将 webHitCount 用于输出显示，消除警告！
-                NSString *resultMsg = [NSString stringWithFormat:@"API返回: %d次\n网页嗅探: %d次 (命中: %d次)\n\n【爬虫底层文字采样】:\n%@", reqSuccessCount, webScrapeCount, webHitCount, sampleResponseStr.length > 0 ? sampleResponseStr : @"空"];
+                NSString *resultMsg = [NSString stringWithFormat:@"本地扫描完成，网络请求(%d次)\n均未命中!\n\n【强行压扁后的文字采样】:\n%@", netReqCount, sampleStr.length > 0 ? sampleStr : @"空"];
                 UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"未能筛到相关商品" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                 [emptyAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
                 [weakSelf presentViewController:emptyAlert animated:YES completion:nil];
@@ -227,135 +232,110 @@
     });
 }
 
-// ====== 终极核武器：全属性扫描 + H5网页爬虫 ======
+// ====== 终极杀招：把一切对象强行压扁为字符串 ======
 %new
-- (BOOL)custom_deepTextSearch:(id)obj target:(NSString *)target visited:(NSMutableSet *)visited depth:(int)depth sample:(NSMutableString *)sampleStr webCounters:(int *)webCounters {
-    if (!obj || depth > 8) return NO;
-    
-    NSValue *ptr = [NSValue valueWithNonretainedObject:obj];
-    if ([visited containsObject:ptr]) return NO;
-    [visited addObject:ptr];
-    
-    if ([obj isKindOfClass:[NSString class]]) {
-        NSString *rawStr = (NSString *)obj;
+- (NSString *)custom_forceStringify:(id)obj {
+    if (!obj) return @"";
+    NSString *resultStr = @"";
+    @try {
+        id dict = nil;
+        // 使用各大厂通用的 JSON 序列化方法，把对象的层层外壳剥掉变成字典
+        if ([obj respondsToSelector:@selector(yy_modelToJSONObject)]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            dict = [obj performSelector:@selector(yy_modelToJSONObject)];
+            #pragma clang diagnostic pop
+        } else if ([obj respondsToSelector:@selector(mj_keyValues)]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            dict = [obj performSelector:@selector(mj_keyValues)];
+            #pragma clang diagnostic pop
+        } else if ([obj respondsToSelector:@selector(modelToDictionary)]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            dict = [obj performSelector:@selector(modelToDictionary)];
+            #pragma clang diagnostic pop
+        }
         
-        // 尝试解除 URL 编码
-        NSString *urlDecoded = [rawStr stringByRemovingPercentEncoding];
-        if (urlDecoded) rawStr = urlDecoded;
+        if (dict) {
+            resultStr = [dict description];
+        } else {
+            resultStr = [obj description];
+        }
         
-        // ====== 特种部队：H5 验机报告爬虫 ======
-        // 只要文本里包含了验机报告的网址，立刻下载这个网址的网页源码搜版本号！
-        if ([rawStr containsString:@"http"] && ([rawStr containsString:@"uem/index.html"] || [rawStr containsString:@"/qc"] || [rawStr containsString:@"report"] || [rawStr containsString:@"detail"])) {
-            
-            NSRange httpRange = [rawStr rangeOfString:@"http"];
-            NSString *urlPart = [rawStr substringFromIndex:httpRange.location];
-            urlPart = [[urlPart componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\"' \n\r\t{}[]()<>"]] firstObject];
-            
-            if (urlPart && urlPart.length > 10 && ![urlPart containsString:@".jpg"] && ![urlPart containsString:@".png"] && ![urlPart containsString:@".mp4"]) {
-                webCounters[0]++; // 抓取网页次数 + 1
-                
-                NSURL *url = [NSURL URLWithString:urlPart];
-                if (url) {
-                    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
-                    __block NSString *webContent = nil;
-                    
-                    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
-                    req.timeoutInterval = 3.0; // 限制 3 秒下载时间
-                    [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15" forHTTPHeaderField:@"User-Agent"];
-                    
-                    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-                        if (d) webContent = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-                        dispatch_semaphore_signal(sema);
-                    }] resume];
-                    
-                    dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC));
-                    
-                    if (webContent) {
-                        // 抓到了网页源码！暴力去空格匹配版本号
-                        NSString *cleanWeb = [[webContent lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
-                        
-                        // 解码 HTML 内的 Unicode 汉字
-                        NSString *unicodeDecodedWeb = [NSString stringWithCString:[cleanWeb cStringUsingEncoding:NSUTF8StringEncoding] encoding:NSNonLossyASCIIStringEncoding];
-                        if (unicodeDecodedWeb) cleanWeb = unicodeDecodedWeb;
-                        
-                        NSString *urlDecodedWeb = [cleanWeb stringByRemovingPercentEncoding];
-                        if (urlDecodedWeb) cleanWeb = urlDecodedWeb;
-                        
-                        if ([cleanWeb containsString:target]) {
-                            webCounters[1]++; // 网页命中次数 + 1
-                            return YES;
-                        }
-                    }
+        // 特殊照顾：强行剥开转转列表用于显示小标签的 labelPosition
+        if ([obj respondsToSelector:NSSelectorFromString(@"labelPosition")]) {
+            id labelPos = [obj valueForKey:@"labelPosition"];
+            if (labelPos) {
+                if ([labelPos respondsToSelector:@selector(yy_modelToJSONObject)]) {
+                    #pragma clang diagnostic push
+                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                    resultStr = [resultStr stringByAppendingFormat:@" %@", [[labelPos performSelector:@selector(yy_modelToJSONObject)] description]];
+                    #pragma clang diagnostic pop
+                } else {
+                    resultStr = [resultStr stringByAppendingFormat:@" %@", [labelPos description]];
                 }
             }
         }
+    } @catch(...) {}
+
+    // 如果里面有 \Uxxxx 这种 Unicode 汉字乱码，强行翻译成正常的中文！
+    NSString *unicodeDecoded = [NSString stringWithCString:[resultStr cStringUsingEncoding:NSUTF8StringEncoding] encoding:NSNonLossyASCIIStringEncoding];
+    if (unicodeDecoded) resultStr = unicodeDecoded;
+    
+    // 如果里面有 %xx 这种 URL 编码，强行解开！
+    NSString *urlDecoded = [resultStr stringByRemovingPercentEncoding];
+    if (urlDecoded) resultStr = urlDecoded;
+
+    // 转成小写，去掉一切空格，让 "15.4" 无所遁形
+    return [[resultStr lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
+}
+
+// ====== 原地修剪 ZZFLEX 列表 ======
+%new
+- (void)custom_pruneZZFLEXArray:(NSMutableArray *)array matchedIds:(NSSet *)matchedIds kept:(int *)kept removed:(int *)removed {
+    for (NSInteger i = array.count - 1; i >= 0; i--) {
+        id item = array[i];
         
-        // 常规文本匹配
-        if (sampleStr && sampleStr.length < 500 && rawStr.length > 0) {
-            [sampleStr appendFormat:@"[%@] ", rawStr];
-        }
-        
-        NSString *cleanStr = [[rawStr lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
-        if ([cleanStr containsString:target]) return YES;
-        
-        return NO;
-    }
-    
-    // 如果是富文本
-    if ([obj isKindOfClass:[NSAttributedString class]]) {
-        NSString *rawStr = [(NSAttributedString *)obj string];
-        if (rawStr) return [self custom_deepTextSearch:rawStr target:target visited:visited depth:depth+1 sample:sampleStr webCounters:webCounters];
-        return NO;
-    }
-    
-    // 数字类型
-    if ([obj isKindOfClass:[NSNumber class]]) {
-        return [self custom_deepTextSearch:[(NSNumber *)obj stringValue] target:target visited:visited depth:depth+1 sample:sampleStr webCounters:webCounters];
-    }
-    
-    // 数组
-    if ([obj isKindOfClass:[NSArray class]]) {
-        for (id item in (NSArray *)obj) {
-            if ([self custom_deepTextSearch:item target:target visited:visited depth:depth+1 sample:sampleStr webCounters:webCounters]) return YES;
-        }
-        return NO;
-    }
-    
-    // 字典类型
-    if ([obj isKindOfClass:[NSDictionary class]]) {
-        for (id val in [(NSDictionary *)obj allValues]) {
-            if ([self custom_deepTextSearch:val target:target visited:visited depth:depth+1 sample:sampleStr webCounters:webCounters]) return YES;
-        }
-        return NO;
-    }
-    
-    // 自定义模型对象
-    NSString *className = NSStringFromClass([obj class]);
-    if ([className hasPrefix:@"ZZ"] || [className hasPrefix:@"SimpleCheck"]) {
-        unsigned int outCount, i;
-        objc_property_t *properties = class_copyPropertyList([obj class], &outCount);
-        if (properties) {
-            for (i = 0; i < outCount; i++) {
-                objc_property_t property = properties[i];
-                const char *propName = property_getName(property);
-                if (propName) {
-                    NSString *propertyName = [NSString stringWithUTF8String:propName];
-                    @try {
-                        id val = [obj valueForKey:propertyName];
-                        if (val) {
-                            if ([self custom_deepTextSearch:val target:target visited:visited depth:depth+1 sample:sampleStr webCounters:webCounters]) {
-                                free(properties);
-                                return YES;
-                            }
-                        }
-                    } @catch (NSException *e) {}
+        // ZZFLEX 的 Section 分组
+        if ([item respondsToSelector:NSSelectorFromString(@"itemsArray")]) {
+            @try {
+                id items = [item valueForKey:@"itemsArray"];
+                if ([items isKindOfClass:[NSMutableArray class]]) {
+                    [self custom_pruneZZFLEXArray:items matchedIds:matchedIds kept:kept removed:removed];
+                } else if ([items isKindOfClass:[NSArray class]]) {
+                    NSMutableArray *mut = [items mutableCopy];
+                    [self custom_pruneZZFLEXArray:mut matchedIds:matchedIds kept:kept removed:removed];
+                    [item setValue:mut forKey:@"itemsArray"];
                 }
+            } @catch(...) {}
+            continue;
+        }
+        
+        // 普通嵌套数组
+        if ([item isKindOfClass:[NSMutableArray class]]) {
+            [self custom_pruneZZFLEXArray:item matchedIds:matchedIds kept:kept removed:removed];
+            continue;
+        }
+        
+        // 获取真正的模型数据
+        id realData = item;
+        if ([item respondsToSelector:NSSelectorFromString(@"dataModel")]) {
+            id inner = [item valueForKey:@"dataModel"];
+            if (inner) realData = inner;
+        }
+        
+        NSString *infoId = [self custom_extractInfoId:realData];
+        if (infoId && infoId.length > 4) {
+            // 如果不在匹配成功的集合里，直接杀掉！
+            if ([matchedIds containsObject:infoId]) {
+                (*kept)++;
+            } else {
+                [array removeObjectAtIndex:i];
+                (*removed)++;
             }
-            free(properties);
         }
     }
-    
-    return NO;
 }
 
 // ====== 智能提取商品 ID ======
