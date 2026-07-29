@@ -1,11 +1,9 @@
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
 
-// ====== 消除 ARC 警告，声明转字典方法 ======
+// ====== 消除 ARC 警告，声明辅助方法 ======
 @interface NSObject (ZZNativeDataConvert)
-- (id)modelToDictionary;
 - (id)mj_keyValues;
-- (id)yy_modelToJSONObject;
-- (id)responseString;
 @end
 
 // ====== 1. 声明转转的网络请求类 ======
@@ -43,7 +41,7 @@
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture;
 - (void)custom_filterWithVersion:(NSString *)version;
 - (NSString *)custom_extractInfoId:(id)obj;
-- (BOOL)custom_matchResponse:(id)response target:(NSString *)target sample:(NSMutableString *)sampleStr;
+- (BOOL)custom_deepTextSearch:(id)obj target:(NSString *)target visited:(NSMutableSet *)visited depth:(int)depth sample:(NSMutableString *)sampleStr;
 - (void)custom_reloadCollectionView;
 @end
 
@@ -63,7 +61,7 @@
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"系统版本核弹级检索" 
-                                                                       message:@"请输入想筛选的iOS版本\n(已开启四路API齐发与全能解码引擎)" 
+                                                                       message:@"请输入想筛选的iOS版本\n(已搭载 Runtime 无限剥层提取引擎)" 
                                                                 preferredStyle:UIAlertControllerStyleAlert];
         
         [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
@@ -106,7 +104,7 @@
     if (!infos || infos.count == 0) return;
     
     UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在四路并发拉取" 
-                                                                          message:@"后台正在强力破解编码并拆解详情，请稍候..." 
+                                                                          message:@"后台内存爬虫正在剥离全部属性，请稍候..." 
                                                                    preferredStyle:UIAlertControllerStyleAlert];
     [self presentViewController:loadingAlert animated:YES completion:nil];
     
@@ -114,14 +112,14 @@
     NSMutableSet *matchedInfoIds = [NSMutableSet set];
     NSLock *lock = [[NSLock alloc] init];
     
-    // 强引用代理对象
     NSMutableArray *retainedProxies = [NSMutableArray array];
     
     __block int matchCount = 0;
     __block int reqSuccessCount = 0;
+    __block int reqFailCount = 0;
     NSMutableString *sampleResponseStr = [[NSMutableString alloc] init];
     
-    // 目标文本标准化
+    // 目标文本标准化：全小写 + 去空格
     NSString *target = [[version lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
     Class ReqModelClass = NSClassFromString(@"ZZInfoDetailRequestModel");
     
@@ -135,11 +133,13 @@
         [reqModel setValue:@(1) forKey:@"from"];
         [reqModel setValue:@"1" forKey:@"pageType"];
         
-        // ====== 请求通用处理 Block ======
+        // 通用回调处理 (极深爬虫搜索)
         void (^handleResponse)(id) = ^(id response) {
             [lock lock]; reqSuccessCount++; [lock unlock];
             
-            BOOL isMatch = [self custom_matchResponse:response target:target sample:sampleResponseStr];
+            NSMutableSet *visited = [NSMutableSet set];
+            BOOL isMatch = [self custom_deepTextSearch:response target:target visited:visited depth:0 sample:sampleResponseStr];
+            
             if (isMatch) {
                 [lock lock];
                 if (![matchedInfoIds containsObject:infoId]) {
@@ -152,6 +152,7 @@
         };
         
         void (^handleFailure)(id) = ^(id error) {
+            [lock lock]; reqFailCount++; [lock unlock];
             dispatch_group_leave(group);
         };
         
@@ -190,7 +191,7 @@
     
     __weak typeof(self) weakSelf = self;
     
-    // 5. 等待所有并发网络请求完成
+    // 5. 等待所有请求完成并处理视图
     dispatch_group_notify(group, dispatch_get_main_queue(), ^{
         [loadingAlert dismissViewControllerAnimated:YES completion:^{
             
@@ -216,13 +217,14 @@
                     [weakSelf custom_reloadCollectionView];
                 }
                 
-                NSString *resultMsg = [NSString stringWithFormat:@"接口全通返回: %d 次\n筛选匹配命中: %d 个", reqSuccessCount, matchCount];
+                NSString *resultMsg = [NSString stringWithFormat:@"接口返回: %d 次\n筛选匹配命中: %d 个", reqSuccessCount, matchCount];
                 UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"筛选成功" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                 [successAlert addAction:[UIAlertAction actionWithTitle:@"完美" style:UIAlertActionStyleDefault handler:nil]];
                 [weakSelf presentViewController:successAlert animated:YES completion:nil];
                 
             } else {
-                NSString *resultMsg = [NSString stringWithFormat:@"接口全通返回: %d 次\n匹配命中: 0 个\n\n【服务器最终解密采样】:\n%@", reqSuccessCount, sampleResponseStr.length > 0 ? sampleResponseStr : @"解析为空"];
+                // 将被爬虫提取出来的、纯粹的底层中文字符显示出来！
+                NSString *resultMsg = [NSString stringWithFormat:@"接口返回: %d 次\n匹配: 0 个\n\n【爬虫底层文字采样】:\n%@", reqSuccessCount, sampleResponseStr.length > 0 ? sampleResponseStr : @"空"];
                 UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"未能筛到相关商品" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                 [emptyAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
                 [weakSelf presentViewController:emptyAlert animated:YES completion:nil];
@@ -231,60 +233,103 @@
     });
 }
 
-// ====== 终极降维打击：全能解码引擎 ======
+// ====== 终极核武器：Runtime 内存爬虫，无视一切数组封装，直接剥出纯文本 ======
 %new
-- (BOOL)custom_matchResponse:(id)response target:(NSString *)target sample:(NSMutableString *)sampleStr {
-    if (!response) return NO;
+- (BOOL)custom_deepTextSearch:(id)obj target:(NSString *)target visited:(NSMutableSet *)visited depth:(int)depth sample:(NSMutableString *)sampleStr {
+    if (!obj || depth > 8) return NO; // 允许挖取 8 层深度
     
-    NSString *rawStr = nil;
-    @try {
-        id dict = nil;
-        if ([response respondsToSelector:@selector(modelToDictionary)]) {
-            dict = [response performSelector:@selector(modelToDictionary)];
-        }
-        if (!dict && [response respondsToSelector:@selector(mj_keyValues)]) {
-            dict = [response performSelector:@selector(mj_keyValues)];
-        }
-        if (!dict && [response respondsToSelector:@selector(yy_modelToJSONObject)]) {
-            dict = [response performSelector:@selector(yy_modelToJSONObject)];
-        }
-        
-        // 提取文本描述
-        if (dict) {
-            rawStr = [dict description];
-        } else if ([response respondsToSelector:@selector(responseString)]) {
-            rawStr = [response performSelector:@selector(responseString)];
-        } else {
-            rawStr = [response description];
-        }
-        
-        if (!rawStr || rawStr.length == 0) return NO;
-
-        // ====== 核心：强力解除 Unicode 和 URL 编码的伪装 ======
-        // 1. 将 \Uxxxx (例如 \U53cd\U9988) 转换为真实汉字
+    // 防循环引用死循环
+    NSValue *ptr = [NSValue valueWithNonretainedObject:obj];
+    if ([visited containsObject:ptr]) return NO;
+    [visited addObject:ptr];
+    
+    // 1. 如果它是字符串，我们终于挖到底了！
+    if ([obj isKindOfClass:[NSString class]]) {
+        // 解除 unicode/url 乱码伪装
+        NSString *rawStr = (NSString *)obj;
         NSString *unicodeDecoded = [NSString stringWithCString:[rawStr cStringUsingEncoding:NSUTF8StringEncoding] encoding:NSNonLossyASCIIStringEncoding];
-        if (unicodeDecoded) {
-            rawStr = unicodeDecoded;
-        }
+        if (unicodeDecoded) rawStr = unicodeDecoded;
         
-        // 2. 将 %xx (例如 %E8%8B%B9) URL 编码转换为真实汉字/符号
         NSString *urlDecoded = [rawStr stringByRemovingPercentEncoding];
-        if (urlDecoded) {
-            rawStr = urlDecoded;
-        }
-
-        // 保存一条解密最完善的样本用于弹窗诊断
-        if (sampleStr && sampleStr.length == 0 && rawStr.length > 0) {
-            [sampleStr appendString:(rawStr.length > 500 ? [rawStr substringToIndex:500] : rawStr)];
+        if (urlDecoded) rawStr = urlDecoded;
+        
+        // ====== 记录样本数据 ======
+        // 遇到中文字符或数字，收集起来打印在弹窗上，这是用来证明我们挖到了什么！
+        if (sampleStr && sampleStr.length < 800 && rawStr.length > 0) {
+            [sampleStr appendFormat:@"[%@] ", rawStr];
         }
         
-        // ====== 全量暴力比对 ======
+        // ====== 终极匹配 ======
         NSString *cleanStr = [[rawStr lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
-        if ([cleanStr containsString:target]) {
-            return YES;
+        if ([cleanStr containsString:target]) return YES;
+        
+        return NO;
+    }
+    
+    // 2. 如果是富文本
+    if ([obj isKindOfClass:[NSAttributedString class]]) {
+        NSString *rawStr = [(NSAttributedString *)obj string];
+        if (rawStr) return [self custom_deepTextSearch:rawStr target:target visited:visited depth:depth+1 sample:sampleStr];
+        return NO;
+    }
+    
+    // 3. 数字类型
+    if ([obj isKindOfClass:[NSNumber class]]) {
+        return [self custom_deepTextSearch:[(NSNumber *)obj stringValue] target:target visited:visited depth:depth+1 sample:sampleStr];
+    }
+    
+    // 4. 数组（比如 supplementaryArr、paramLabelsInfo），遍历里面装的神奇对象
+    if ([obj isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)obj) {
+            if ([self custom_deepTextSearch:item target:target visited:visited depth:depth+1 sample:sampleStr]) return YES;
+        }
+        return NO;
+    }
+    
+    // 5. 字典类型
+    if ([obj isKindOfClass:[NSDictionary class]]) {
+        for (id val in [(NSDictionary *)obj allValues]) {
+            if ([self custom_deepTextSearch:val target:target visited:visited depth:depth+1 sample:sampleStr]) return YES;
+        }
+        return NO;
+    }
+    
+    // 6. 自定义模型对象（比如 ZZGoodsDetailSupplementaryModel / ZZLabelInfoModel）
+    NSString *className = NSStringFromClass([obj class]);
+    if ([className hasPrefix:@"ZZ"] || [className hasPrefix:@"SimpleCheck"]) {
+        unsigned int outCount, i;
+        // 使用 Runtime 强行读取这个对象里声明的所有属性
+        objc_property_t *properties = class_copyPropertyList([obj class], &outCount);
+        if (properties) {
+            for (i = 0; i < outCount; i++) {
+                objc_property_t property = properties[i];
+                const char *propName = property_getName(property);
+                if (propName) {
+                    NSString *propertyName = [NSString stringWithUTF8String:propName];
+                    @try {
+                        id val = [obj valueForKey:propertyName];
+                        if (val) {
+                            if ([self custom_deepTextSearch:val target:target visited:visited depth:depth+1 sample:sampleStr]) {
+                                free(properties);
+                                return YES;
+                            }
+                        }
+                    } @catch (NSException *e) {}
+                }
+            }
+            free(properties);
         }
         
-    } @catch (NSException *e) {}
+        // 兜底：如果这个模型支持转字典，也挖一下字典
+        @try {
+            if ([obj respondsToSelector:@selector(mj_keyValues)]) {
+                id dict = [obj performSelector:@selector(mj_keyValues)];
+                if ([dict isKindOfClass:[NSDictionary class]]) {
+                    if ([self custom_deepTextSearch:dict target:target visited:visited depth:depth+1 sample:sampleStr]) return YES;
+                }
+            }
+        } @catch(...) {}
+    }
     
     return NO;
 }
