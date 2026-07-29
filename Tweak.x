@@ -1,14 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-// ====== 1. 声明转转的网络请求类 ======
-@interface ZZInfoDetailRequestModel : NSObject
-@property (copy, nonatomic) NSString *infoID;
-@property (nonatomic) unsigned long long from;
-@property (copy, nonatomic) NSString *pageType;
-@end
-
-// C2C 与 B2C 接口
+// ====== 1. 声明转转的网络代理类 ======
 @interface ZZInfoDetailProxy : NSObject
 - (void)requestInfoDetailDatas:(id)req success:(void(^)(id response))success failure:(void(^)(id error))failure;
 - (void)requestGetSupplementaryInfoWith:(id)req success:(void(^)(id response))success failure:(void(^)(id error))failure;
@@ -19,10 +12,17 @@
 - (void)requestGoodsDetailExtraDateWithRequestModel:(id)req success:(void(^)(id response))success failure:(void(^)(id error))failure;
 @end
 
+@interface ZZListingResponseModel : NSObject
+@property (retain, nonatomic) NSMutableArray *infos;
+@end
+
 // ====== 2. 声明列表控制器 ======
 @interface ZZListingAprilViewController : UIViewController
 @property (retain, nonatomic) NSArray *dataArray;
+@property (retain, nonatomic) ZZListingResponseModel *firstPageResponseData;
 - (void)loadData;
+- (void)real_reloadData:(id)arg;
+- (void)reloadListingGoodsWithRespModel:(id)arg;
 
 // 自定义方法声明
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture;
@@ -47,8 +47,8 @@
 %new
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"全局系统版本检索" 
-                                                                       message:@"请输入想筛选的iOS版本\n(已修复分页漏洞，将扫描你划过的所有商品)" 
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"系统版本全网段检索" 
+                                                                       message:@"请输入想筛选的iOS版本\n(已搭载万能字典注入与全接口轰炸引擎)" 
                                                                 preferredStyle:UIAlertControllerStyleAlert];
         
         [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
@@ -58,7 +58,7 @@
         }];
         
         __weak typeof(self) weakSelf = self;
-        UIAlertAction *confirmAction = [UIAlertAction actionWithTitle:@"开始筛选" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        UIAlertAction *confirmAction = [UIAlertAction actionWithTitle:@"开始轰炸" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
             NSString *versionText = alert.textFields.firstObject.text;
             if (versionText.length > 0) {
                 [weakSelf custom_filterWithVersion:versionText];
@@ -83,23 +83,16 @@
 
 %new
 - (void)custom_filterWithVersion:(NSString *)version {
-    if (!self.dataArray || self.dataArray.count == 0) {
-        return;
-    }
+    if (!self.dataArray || self.dataArray.count == 0) return;
     
-    // ====== 核心修复：直接从屏幕数据源中提取所有已加载的商品 ======
+    // 递归收集你划出来的、屏幕上加载过的所有商品
     NSMutableDictionary *allProducts = [NSMutableDictionary dictionary];
     [self custom_collectProductsFrom:self.dataArray into:allProducts];
     
-    if (allProducts.count == 0) {
-        UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"提示" message:@"当前列表未能识别到商品，请刷新重试" preferredStyle:UIAlertControllerStyleAlert];
-        [emptyAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
-        [self presentViewController:emptyAlert animated:YES completion:nil];
-        return;
-    }
+    if (allProducts.count == 0) return;
     
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在全局深度扫描" 
-                                                                          message:[NSString stringWithFormat:@"已锁定 %lu 个商品，正在进行本地与网络深度挖掘...", (unsigned long)allProducts.count]
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在全接口轰炸扫描" 
+                                                                          message:[NSString stringWithFormat:@"已锁定 %lu 个商品，正在跨接口挖掘验机报告...", (unsigned long)allProducts.count]
                                                                    preferredStyle:UIAlertControllerStyleAlert];
     [self presentViewController:loadingAlert animated:YES completion:nil];
     
@@ -112,27 +105,30 @@
     __block int localMatchCount = 0;
     __block int netMatchCount = 0;
     __block int netReqCount = 0;
+    __block int netFailCount = 0;
     NSMutableString *sampleResponseStr = [[NSMutableString alloc] init];
     
     NSString *target = [[version lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
-    Class ReqModelClass = NSClassFromString(@"ZZInfoDetailRequestModel");
     
     for (NSString *infoId in allProducts.allKeys) {
         id item = allProducts[infoId];
         
-        // ====== 第一步：本地深度搜索 (完美解决列表有却搜不到的问题) ======
+        // ====== 1. 本地扫描 (找C2C闲置卖家自己写的版本) ======
         NSMutableSet *visited = [NSMutableSet set];
         if ([self custom_deepTextSearch:item target:target visited:visited depth:0 sample:sampleResponseStr]) {
             [matchedInfoIds addObject:infoId];
             localMatchCount++;
-            continue; // 本地命中了就不发请求了，加速！
+            continue;
         }
         
-        // ====== 第二步：网络请求查详情页 (解决详情里有但列表没写的问题) ======
-        id reqModel = [[ReqModelClass alloc] init];
-        [reqModel setValue:infoId forKey:@"infoID"];
-        [reqModel setValue:@(1) forKey:@"from"];
-        [reqModel setValue:@"1" forKey:@"pageType"];
+        // ====== 2. 黑客级万能字典传参 (绕过模型验证，兼容所有接口) ======
+        NSMutableDictionary *uniReq = [NSMutableDictionary dictionary];
+        uniReq[@"infoID"] = infoId;
+        uniReq[@"infoId"] = infoId;
+        uniReq[@"goodsId"] = infoId;
+        uniReq[@"goodsID"] = infoId;
+        uniReq[@"from"] = @(1);
+        uniReq[@"pageType"] = @"1";
         
         void (^handleResponse)(id) = ^(id response) {
             [lock lock]; netReqCount++; [lock unlock];
@@ -152,33 +148,52 @@
         };
         
         void (^handleFailure)(id) = ^(id error) {
+            [lock lock]; netFailCount++; [lock unlock];
             dispatch_group_leave(group);
         };
         
-        Class ProxyClassC2C = NSClassFromString(@"ZZInfoDetailProxy");
-        if (ProxyClassC2C) {
-            id proxyC2C = [[ProxyClassC2C alloc] init];
-            [retainedProxies addObject:proxyC2C];
-            if ([proxyC2C respondsToSelector:@selector(requestInfoDetailDatas:success:failure:)]) {
-                dispatch_group_enter(group);
-                [proxyC2C requestInfoDetailDatas:reqModel success:handleResponse failure:handleFailure];
-            }
-        }
+        // ====== 3. 暴力穷举所有可能的详情与验机接口 ======
+        NSArray *proxyClassNames = @[
+            @"ZZInfoDetailProxy", 
+            @"ZZGoodsDetailProxy", 
+            @"ZZQcReportProxy", 
+            @"ZZQualityControlProxy", 
+            @"ZZGoodsReportProxy"
+        ];
         
-        Class ProxyClassB2C = NSClassFromString(@"ZZGoodsDetailProxy");
-        if (ProxyClassB2C) {
-            id proxyB2C = [[ProxyClassB2C alloc] init];
-            [retainedProxies addObject:proxyB2C];
-            if ([proxyB2C respondsToSelector:@selector(requestGoodsDetailDateWithRequestModel:success:failure:)]) {
+        for (NSString *proxyName in proxyClassNames) {
+            Class ProxyCls = NSClassFromString(proxyName);
+            if (!ProxyCls) continue;
+            
+            id proxy = [[ProxyCls alloc] init];
+            [retainedProxies addObject:proxy];
+            
+            // 轰炸方法1
+            if ([proxy respondsToSelector:@selector(requestInfoDetailDatas:success:failure:)]) {
                 dispatch_group_enter(group);
-                [proxyB2C requestGoodsDetailDateWithRequestModel:reqModel success:handleResponse failure:handleFailure];
+                [proxy requestInfoDetailDatas:uniReq success:handleResponse failure:handleFailure];
+            }
+            // 轰炸方法2
+            if ([proxy respondsToSelector:@selector(requestGetSupplementaryInfoWith:success:failure:)]) {
+                dispatch_group_enter(group);
+                [proxy requestGetSupplementaryInfoWith:uniReq success:handleResponse failure:handleFailure];
+            }
+            // 轰炸方法3
+            if ([proxy respondsToSelector:@selector(requestGoodsDetailDateWithRequestModel:success:failure:)]) {
+                dispatch_group_enter(group);
+                [proxy requestGoodsDetailDateWithRequestModel:uniReq success:handleResponse failure:handleFailure];
+            }
+            // 轰炸方法4
+            if ([proxy respondsToSelector:@selector(requestGoodsDetailExtraDateWithRequestModel:success:failure:)]) {
+                dispatch_group_enter(group);
+                [proxy requestGoodsDetailExtraDateWithRequestModel:uniReq success:handleResponse failure:handleFailure];
             }
         }
     }
     
     __weak typeof(self) weakSelf = self;
     
-    // 等待所有任务完成
+    // 4. 执行结果清算
     dispatch_group_notify(group, dispatch_get_main_queue(), ^{
         [loadingAlert dismissViewControllerAnimated:YES completion:^{
             [retainedProxies removeAllObjects];
@@ -191,15 +206,15 @@
                 
                 [weakSelf custom_reloadCollectionView];
                 
-                NSString *resultMsg = [NSString stringWithFormat:@"总计处理商品: %lu 个\n本地精准命中: %d 个\n详情挖掘命中: %d 个\n\n已为您剔除 %d 个无关商品！", (unsigned long)allProducts.count, localMatchCount, netMatchCount, removed];
+                NSString *resultMsg = [NSString stringWithFormat:@"总计处理商品: %lu 个\n本地直接命中: %d 个\n深层接口挖掘: %d 个\n\n已为您剔除 %d 个无关商品！", (unsigned long)allProducts.count, localMatchCount, netMatchCount, removed];
                 UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"筛选成功" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                 [successAlert addAction:[UIAlertAction actionWithTitle:@"太棒了" style:UIAlertActionStyleDefault handler:nil]];
                 [weakSelf presentViewController:successAlert animated:YES completion:nil];
                 
             } else {
-                NSString *resultMsg = [NSString stringWithFormat:@"总计处理商品: %lu 个\n网络深入排查: %d 次\n\n依然未找到匹配项。\n为证明爬虫运行正常，截取第一台设备属性：\n%@\n\n※ 请继续向下滑动加载更多，再重试！", (unsigned long)allProducts.count, netReqCount, sampleResponseStr.length > 0 ? sampleResponseStr : @"空"];
+                NSString *resultMsg = [NSString stringWithFormat:@"处理商品: %lu 个\n多路接口请求成功: %d 次 (失败 %d 次)\n匹配命中: 0 个\n\n【底层内存采样】:\n%@\n\n※ 请继续向下加载更多商品后，再次筛选！", (unsigned long)allProducts.count, netReqCount, netFailCount, sampleResponseStr.length > 0 ? sampleResponseStr : @"空"];
                 UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"当前列表无匹配项" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
-                [emptyAlert addAction:[UIAlertAction actionWithTitle:@"好的，我往下多划一点" style:UIAlertActionStyleCancel handler:nil]];
+                [emptyAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
                 [weakSelf presentViewController:emptyAlert animated:YES completion:nil];
             }
         }];
@@ -210,32 +225,21 @@
 %new
 - (void)custom_collectProductsFrom:(id)obj into:(NSMutableDictionary *)dict {
     if (!obj) return;
-    
     if ([obj isKindOfClass:[NSArray class]]) {
-        for (id item in (NSArray *)obj) {
-            [self custom_collectProductsFrom:item into:dict];
-        }
+        for (id item in (NSArray *)obj) [self custom_collectProductsFrom:item into:dict];
         return;
     }
-    
     if ([obj respondsToSelector:NSSelectorFromString(@"itemsArray")]) {
-        @try {
-            id items = [obj valueForKey:@"itemsArray"];
-            [self custom_collectProductsFrom:items into:dict];
-        } @catch(...) {}
+        @try { id items = [obj valueForKey:@"itemsArray"]; [self custom_collectProductsFrom:items into:dict]; } @catch(...) {}
         return;
     }
-    
     id realData = obj;
     if ([obj respondsToSelector:NSSelectorFromString(@"dataModel")]) {
         id inner = [obj valueForKey:@"dataModel"];
         if (inner) realData = inner;
     }
-    
     NSString *infoId = [self custom_extractInfoId:realData];
-    if (infoId && infoId.length > 4) {
-        dict[infoId] = realData;
-    }
+    if (infoId && infoId.length > 4) dict[infoId] = realData;
 }
 
 // ====== 无限安全的底层文字爬虫 ======
@@ -249,7 +253,6 @@
     
     if ([obj isKindOfClass:[NSString class]]) {
         NSString *rawStr = (NSString *)obj;
-        
         if ([rawStr containsString:@"<ZZ"] || [rawStr containsString:@"ZZCommonFeed"]) return NO;
         
         NSString *unicodeDecoded = [NSString stringWithCString:[rawStr cStringUsingEncoding:NSUTF8StringEncoding] encoding:NSNonLossyASCIIStringEncoding];
@@ -263,7 +266,6 @@
         
         NSString *cleanStr = [[rawStr lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
         if ([cleanStr containsString:target]) return YES;
-        
         return NO;
     }
     
@@ -318,7 +320,6 @@
             currentClass = class_getSuperclass(currentClass);
         }
     }
-    
     return NO;
 }
 
@@ -327,7 +328,6 @@
 - (void)custom_pruneZZFLEXArray:(NSMutableArray *)array matchedIds:(NSSet *)matchedIds kept:(int *)kept removed:(int *)removed {
     for (NSInteger i = array.count - 1; i >= 0; i--) {
         id item = array[i];
-        
         if ([item respondsToSelector:NSSelectorFromString(@"itemsArray")]) {
             @try {
                 id items = [item valueForKey:@"itemsArray"];
@@ -341,18 +341,15 @@
             } @catch(...) {}
             continue;
         }
-        
         if ([item isKindOfClass:[NSMutableArray class]]) {
             [self custom_pruneZZFLEXArray:item matchedIds:matchedIds kept:kept removed:removed];
             continue;
         }
-        
         id realData = item;
         if ([item respondsToSelector:NSSelectorFromString(@"dataModel")]) {
             id inner = [item valueForKey:@"dataModel"];
             if (inner) realData = inner;
         }
-        
         NSString *infoId = [self custom_extractInfoId:realData];
         if (infoId && infoId.length > 4) {
             if ([matchedIds containsObject:infoId]) {
@@ -398,10 +395,8 @@
     while (queue.count > 0) {
         UIView *currentView = queue.firstObject;
         [queue removeObjectAtIndex:0];
-        
         if ([currentView isKindOfClass:[UICollectionView class]]) [(UICollectionView *)currentView reloadData];
         else if ([currentView isKindOfClass:[UITableView class]]) [(UITableView *)currentView reloadData];
-        
         [queue addObjectsFromArray:currentView.subviews];
     }
 }
