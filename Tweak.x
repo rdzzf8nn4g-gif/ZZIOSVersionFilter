@@ -112,11 +112,12 @@
     NSMutableSet *matchedInfoIds = [NSMutableSet set];
     NSLock *lock = [[NSLock alloc] init];
     
+    // 强引用代理对象
     NSMutableArray *retainedProxies = [NSMutableArray array];
     
     __block int matchCount = 0;
     __block int reqSuccessCount = 0;
-    __block int reqFailCount = 0;
+    __block int reqFailCount = 0; // 修复点：加入未使用的变量
     NSMutableString *sampleResponseStr = [[NSMutableString alloc] init];
     
     // 目标文本标准化：全小写 + 去空格
@@ -133,7 +134,7 @@
         [reqModel setValue:@(1) forKey:@"from"];
         [reqModel setValue:@"1" forKey:@"pageType"];
         
-        // 通用回调处理 (极深爬虫搜索)
+        // ====== 请求通用处理 Block ======
         void (^handleResponse)(id) = ^(id response) {
             [lock lock]; reqSuccessCount++; [lock unlock];
             
@@ -152,7 +153,7 @@
         };
         
         void (^handleFailure)(id) = ^(id error) {
-            [lock lock]; reqFailCount++; [lock unlock];
+            [lock lock]; reqFailCount++; [lock unlock]; // 增加计数
             dispatch_group_leave(group);
         };
         
@@ -191,7 +192,7 @@
     
     __weak typeof(self) weakSelf = self;
     
-    // 5. 等待所有请求完成并处理视图
+    // 5. 等待所有并发网络请求完成
     dispatch_group_notify(group, dispatch_get_main_queue(), ^{
         [loadingAlert dismissViewControllerAnimated:YES completion:^{
             
@@ -217,14 +218,15 @@
                     [weakSelf custom_reloadCollectionView];
                 }
                 
-                NSString *resultMsg = [NSString stringWithFormat:@"接口返回: %d 次\n筛选匹配命中: %d 个", reqSuccessCount, matchCount];
+                // 修复点：将 reqFailCount 加入打印输出
+                NSString *resultMsg = [NSString stringWithFormat:@"接口全通返回: %d 次\n网络请求失败: %d 次\n筛选匹配命中: %d 个", reqSuccessCount, reqFailCount, matchCount];
                 UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"筛选成功" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                 [successAlert addAction:[UIAlertAction actionWithTitle:@"完美" style:UIAlertActionStyleDefault handler:nil]];
                 [weakSelf presentViewController:successAlert animated:YES completion:nil];
                 
             } else {
-                // 将被爬虫提取出来的、纯粹的底层中文字符显示出来！
-                NSString *resultMsg = [NSString stringWithFormat:@"接口返回: %d 次\n匹配: 0 个\n\n【爬虫底层文字采样】:\n%@", reqSuccessCount, sampleResponseStr.length > 0 ? sampleResponseStr : @"空"];
+                // 修复点：将 reqFailCount 加入打印输出
+                NSString *resultMsg = [NSString stringWithFormat:@"接口返回: %d 次\n网络失败: %d 次\n匹配命中: 0 个\n\n【爬虫底层文字采样】:\n%@", reqSuccessCount, reqFailCount, sampleResponseStr.length > 0 ? sampleResponseStr : @"解析为空"];
                 UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"未能筛到相关商品" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                 [emptyAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
                 [weakSelf presentViewController:emptyAlert animated:YES completion:nil];
@@ -233,7 +235,7 @@
     });
 }
 
-// ====== 终极核武器：Runtime 内存爬虫，无视一切数组封装，直接剥出纯文本 ======
+// ====== 终极核武器：Runtime 内存爬虫 ======
 %new
 - (BOOL)custom_deepTextSearch:(id)obj target:(NSString *)target visited:(NSMutableSet *)visited depth:(int)depth sample:(NSMutableString *)sampleStr {
     if (!obj || depth > 8) return NO; // 允许挖取 8 层深度
@@ -254,7 +256,6 @@
         if (urlDecoded) rawStr = urlDecoded;
         
         // ====== 记录样本数据 ======
-        // 遇到中文字符或数字，收集起来打印在弹窗上，这是用来证明我们挖到了什么！
         if (sampleStr && sampleStr.length < 800 && rawStr.length > 0) {
             [sampleStr appendFormat:@"[%@] ", rawStr];
         }
@@ -278,7 +279,7 @@
         return [self custom_deepTextSearch:[(NSNumber *)obj stringValue] target:target visited:visited depth:depth+1 sample:sampleStr];
     }
     
-    // 4. 数组（比如 supplementaryArr、paramLabelsInfo），遍历里面装的神奇对象
+    // 4. 数组
     if ([obj isKindOfClass:[NSArray class]]) {
         for (id item in (NSArray *)obj) {
             if ([self custom_deepTextSearch:item target:target visited:visited depth:depth+1 sample:sampleStr]) return YES;
@@ -294,7 +295,7 @@
         return NO;
     }
     
-    // 6. 自定义模型对象（比如 ZZGoodsDetailSupplementaryModel / ZZLabelInfoModel）
+    // 6. 自定义模型对象（突破所有数组封装）
     NSString *className = NSStringFromClass([obj class]);
     if ([className hasPrefix:@"ZZ"] || [className hasPrefix:@"SimpleCheck"]) {
         unsigned int outCount, i;
@@ -320,10 +321,13 @@
             free(properties);
         }
         
-        // 兜底：如果这个模型支持转字典，也挖一下字典
+        // 兜底字典
         @try {
             if ([obj respondsToSelector:@selector(mj_keyValues)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                 id dict = [obj performSelector:@selector(mj_keyValues)];
+                #pragma clang diagnostic pop
                 if ([dict isKindOfClass:[NSDictionary class]]) {
                     if ([self custom_deepTextSearch:dict target:target visited:visited depth:depth+1 sample:sampleStr]) return YES;
                 }
