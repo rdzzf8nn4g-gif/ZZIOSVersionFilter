@@ -1,11 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-// ====== 消除 ARC 警告，声明辅助方法 ======
-@interface NSObject (ZZNativeDataConvert)
-- (id)mj_keyValues;
-@end
-
 // ====== 1. 声明转转的网络请求类 ======
 @interface ZZInfoDetailRequestModel : NSObject
 @property (copy, nonatomic) NSString *infoID;
@@ -13,13 +8,12 @@
 @property (copy, nonatomic) NSString *pageType;
 @end
 
-// C2C 接口
+// C2C 与 B2C 接口
 @interface ZZInfoDetailProxy : NSObject
 - (void)requestInfoDetailDatas:(id)req success:(void(^)(id response))success failure:(void(^)(id error))failure;
 - (void)requestGetSupplementaryInfoWith:(id)req success:(void(^)(id response))success failure:(void(^)(id error))failure;
 @end
 
-// B2C 接口
 @interface ZZGoodsDetailProxy : NSObject
 - (void)requestGoodsDetailDateWithRequestModel:(id)req success:(void(^)(id response))success failure:(void(^)(id error))failure;
 - (void)requestGoodsDetailExtraDateWithRequestModel:(id)req success:(void(^)(id response))success failure:(void(^)(id error))failure;
@@ -41,10 +35,9 @@
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture;
 - (void)custom_filterWithVersion:(NSString *)version;
 - (NSString *)custom_extractInfoId:(id)obj;
-- (BOOL)custom_deepTextSearch:(id)obj target:(NSString *)target visited:(NSMutableSet *)visited depth:(int)depth sample:(NSMutableString *)sampleStr;
+- (BOOL)custom_deepTextSearch:(id)obj target:(NSString *)target visited:(NSMutableSet *)visited depth:(int)depth sample:(NSMutableString *)sampleStr webCounters:(int *)webCounters;
 - (void)custom_reloadCollectionView;
 @end
-
 
 %hook ZZListingAprilViewController
 
@@ -60,8 +53,8 @@
 %new
 - (void)custom_twoFingerLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"系统版本核弹级检索" 
-                                                                       message:@"请输入想筛选的iOS版本\n(已搭载 Runtime 无限剥层提取引擎)" 
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"系统版本究极检索" 
+                                                                       message:@"请输入想筛选的iOS版本\n(已挂载H5验机报告穿透引擎)" 
                                                                 preferredStyle:UIAlertControllerStyleAlert];
         
         [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
@@ -103,8 +96,8 @@
     NSArray *infos = [self.firstPageResponseData valueForKey:@"infos"];
     if (!infos || infos.count == 0) return;
     
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在四路并发拉取" 
-                                                                          message:@"后台内存爬虫正在剥离全部属性，请稍候..." 
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在全网段拉取" 
+                                                                          message:@"后台已开启 API 并发与 H5 验机报告嗅探，请稍候..." 
                                                                    preferredStyle:UIAlertControllerStyleAlert];
     [self presentViewController:loadingAlert animated:YES completion:nil];
     
@@ -112,12 +105,12 @@
     NSMutableSet *matchedInfoIds = [NSMutableSet set];
     NSLock *lock = [[NSLock alloc] init];
     
-    // 强引用代理对象
     NSMutableArray *retainedProxies = [NSMutableArray array];
     
     __block int matchCount = 0;
     __block int reqSuccessCount = 0;
-    __block int reqFailCount = 0; // 修复点：加入未使用的变量
+    __block int webScrapeCount = 0;
+    __block int webHitCount = 0;
     NSMutableString *sampleResponseStr = [[NSMutableString alloc] init];
     
     // 目标文本标准化：全小写 + 去空格
@@ -128,32 +121,34 @@
         NSString *infoId = [self custom_extractInfoId:item];
         if (!infoId || infoId.length < 4) continue;
         
-        // 构造请求体
         id reqModel = [[ReqModelClass alloc] init];
         [reqModel setValue:infoId forKey:@"infoID"];
         [reqModel setValue:@(1) forKey:@"from"];
         [reqModel setValue:@"1" forKey:@"pageType"];
         
-        // ====== 请求通用处理 Block ======
+        // 通用回调处理
         void (^handleResponse)(id) = ^(id response) {
             [lock lock]; reqSuccessCount++; [lock unlock];
             
             NSMutableSet *visited = [NSMutableSet set];
-            BOOL isMatch = [self custom_deepTextSearch:response target:target visited:visited depth:0 sample:sampleResponseStr];
+            int localWebCounters[2] = {0, 0}; // 0: 抓取网页次数, 1: 网页命中次数
             
+            BOOL isMatch = [self custom_deepTextSearch:response target:target visited:visited depth:0 sample:sampleResponseStr webCounters:localWebCounters];
+            
+            [lock lock];
+            webScrapeCount += localWebCounters[0];
+            webHitCount += localWebCounters[1];
             if (isMatch) {
-                [lock lock];
                 if (![matchedInfoIds containsObject:infoId]) {
                     [matchedInfoIds addObject:infoId];
                     matchCount++;
                 }
-                [lock unlock];
             }
+            [lock unlock];
             dispatch_group_leave(group);
         };
         
         void (^handleFailure)(id) = ^(id error) {
-            [lock lock]; reqFailCount++; [lock unlock]; // 增加计数
             dispatch_group_leave(group);
         };
         
@@ -162,7 +157,6 @@
         if (ProxyClassC2C) {
             id proxyC2C = [[ProxyClassC2C alloc] init];
             [retainedProxies addObject:proxyC2C];
-            
             if ([proxyC2C respondsToSelector:@selector(requestInfoDetailDatas:success:failure:)]) {
                 dispatch_group_enter(group);
                 [proxyC2C requestInfoDetailDatas:reqModel success:handleResponse failure:handleFailure];
@@ -178,7 +172,6 @@
         if (ProxyClassB2C) {
             id proxyB2C = [[ProxyClassB2C alloc] init];
             [retainedProxies addObject:proxyB2C];
-            
             if ([proxyB2C respondsToSelector:@selector(requestGoodsDetailDateWithRequestModel:success:failure:)]) {
                 dispatch_group_enter(group);
                 [proxyB2C requestGoodsDetailDateWithRequestModel:reqModel success:handleResponse failure:handleFailure];
@@ -192,10 +185,9 @@
     
     __weak typeof(self) weakSelf = self;
     
-    // 5. 等待所有并发网络请求完成
+    // 5. 等待所有请求和网页爬取完成
     dispatch_group_notify(group, dispatch_get_main_queue(), ^{
         [loadingAlert dismissViewControllerAnimated:YES completion:^{
-            
             [retainedProxies removeAllObjects];
             
             if (matchCount > 0) {
@@ -218,15 +210,13 @@
                     [weakSelf custom_reloadCollectionView];
                 }
                 
-                // 修复点：将 reqFailCount 加入打印输出
-                NSString *resultMsg = [NSString stringWithFormat:@"接口全通返回: %d 次\n网络请求失败: %d 次\n筛选匹配命中: %d 个", reqSuccessCount, reqFailCount, matchCount];
+                NSString *resultMsg = [NSString stringWithFormat:@"API 成功返回: %d 次\n嗅探验机报告网页: %d 次\n\n完美命中商品: %d 个", reqSuccessCount, webScrapeCount, matchCount];
                 UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"筛选成功" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                 [successAlert addAction:[UIAlertAction actionWithTitle:@"完美" style:UIAlertActionStyleDefault handler:nil]];
                 [weakSelf presentViewController:successAlert animated:YES completion:nil];
                 
             } else {
-                // 修复点：将 reqFailCount 加入打印输出
-                NSString *resultMsg = [NSString stringWithFormat:@"接口返回: %d 次\n网络失败: %d 次\n匹配命中: 0 个\n\n【爬虫底层文字采样】:\n%@", reqSuccessCount, reqFailCount, sampleResponseStr.length > 0 ? sampleResponseStr : @"解析为空"];
+                NSString *resultMsg = [NSString stringWithFormat:@"API返回: %d次 | 嗅探网页: %d次\n匹配: 0 个\n\n【爬虫底层文字采样】:\n%@", reqSuccessCount, webScrapeCount, sampleResponseStr.length > 0 ? sampleResponseStr : @"空"];
                 UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"未能筛到相关商品" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                 [emptyAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
                 [weakSelf presentViewController:emptyAlert animated:YES completion:nil];
@@ -235,71 +225,114 @@
     });
 }
 
-// ====== 终极核武器：Runtime 内存爬虫 ======
+// ====== 终极核武器：全属性扫描 + H5网页爬虫 ======
 %new
-- (BOOL)custom_deepTextSearch:(id)obj target:(NSString *)target visited:(NSMutableSet *)visited depth:(int)depth sample:(NSMutableString *)sampleStr {
-    if (!obj || depth > 8) return NO; // 允许挖取 8 层深度
+- (BOOL)custom_deepTextSearch:(id)obj target:(NSString *)target visited:(NSMutableSet *)visited depth:(int)depth sample:(NSMutableString *)sampleStr webCounters:(int *)webCounters {
+    if (!obj || depth > 8) return NO;
     
-    // 防循环引用死循环
     NSValue *ptr = [NSValue valueWithNonretainedObject:obj];
     if ([visited containsObject:ptr]) return NO;
     [visited addObject:ptr];
     
-    // 1. 如果它是字符串，我们终于挖到底了！
     if ([obj isKindOfClass:[NSString class]]) {
-        // 解除 unicode/url 乱码伪装
         NSString *rawStr = (NSString *)obj;
-        NSString *unicodeDecoded = [NSString stringWithCString:[rawStr cStringUsingEncoding:NSUTF8StringEncoding] encoding:NSNonLossyASCIIStringEncoding];
-        if (unicodeDecoded) rawStr = unicodeDecoded;
         
+        // 尝试解除 URL 编码（解决 https%3A%2F%2F 这种被编码的链接）
         NSString *urlDecoded = [rawStr stringByRemovingPercentEncoding];
         if (urlDecoded) rawStr = urlDecoded;
         
-        // ====== 记录样本数据 ======
-        if (sampleStr && sampleStr.length < 800 && rawStr.length > 0) {
+        // ====== 特种部队：H5 验机报告爬虫 ======
+        // 只要这个文本里包含了验机报告的网址，我们就立刻下载这个网址的网页源码去搜版本号！
+        if ([rawStr containsString:@"http"] && ([rawStr containsString:@"uem/index.html"] || [rawStr containsString:@"/qc"] || [rawStr containsString:@"report"] || [rawStr containsString:@"detail"])) {
+            
+            // 提取出真正的 http 链接
+            NSRange httpRange = [rawStr rangeOfString:@"http"];
+            NSString *urlPart = [rawStr substringFromIndex:httpRange.location];
+            urlPart = [[urlPart componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\"' \n\r\t{}[]()<>"]] firstObject];
+            
+            // 排除普通图片视频链接，只抓网页
+            if (urlPart && urlPart.length > 10 && ![urlPart containsString:@".jpg"] && ![urlPart containsString:@".png"] && ![urlPart containsString:@".mp4"]) {
+                webCounters[0]++; // 抓取网页次数 + 1
+                
+                NSURL *url = [NSURL URLWithString:urlPart];
+                if (url) {
+                    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+                    __block NSString *webContent = nil;
+                    
+                    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+                    req.timeoutInterval = 3.0; // 限制 3 秒下载时间
+                    [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15" forHTTPHeaderField:@"User-Agent"];
+                    
+                    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+                        if (d) webContent = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+                        dispatch_semaphore_signal(sema);
+                    }] resume];
+                    
+                    dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC));
+                    
+                    if (webContent) {
+                        // 抓到了网页源码！暴力去空格匹配版本号
+                        NSString *cleanWeb = [[webContent lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
+                        
+                        // 有时候网页里的汉字和版本号是 unicode 编码（如 \u56fd）
+                        NSString *unicodeDecodedWeb = [NSString stringWithCString:[cleanWeb cStringUsingEncoding:NSUTF8StringEncoding] encoding:NSNonLossyASCIIStringEncoding];
+                        if (unicodeDecodedWeb) cleanWeb = unicodeDecodedWeb;
+                        
+                        NSString *urlDecodedWeb = [cleanWeb stringByRemovingPercentEncoding];
+                        if (urlDecodedWeb) cleanWeb = urlDecodedWeb;
+                        
+                        if ([cleanWeb containsString:target]) {
+                            webCounters[1]++; // 网页命中次数 + 1
+                            return YES;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 常规文本匹配
+        if (sampleStr && sampleStr.length < 500 && rawStr.length > 0) {
             [sampleStr appendFormat:@"[%@] ", rawStr];
         }
         
-        // ====== 终极匹配 ======
         NSString *cleanStr = [[rawStr lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
         if ([cleanStr containsString:target]) return YES;
         
         return NO;
     }
     
-    // 2. 如果是富文本
+    // 如果是富文本
     if ([obj isKindOfClass:[NSAttributedString class]]) {
         NSString *rawStr = [(NSAttributedString *)obj string];
-        if (rawStr) return [self custom_deepTextSearch:rawStr target:target visited:visited depth:depth+1 sample:sampleStr];
+        if (rawStr) return [self custom_deepTextSearch:rawStr target:target visited:visited depth:depth+1 sample:sampleStr webCounters:webCounters];
         return NO;
     }
     
-    // 3. 数字类型
+    // 数字类型
     if ([obj isKindOfClass:[NSNumber class]]) {
-        return [self custom_deepTextSearch:[(NSNumber *)obj stringValue] target:target visited:visited depth:depth+1 sample:sampleStr];
+        return [self custom_deepTextSearch:[(NSNumber *)obj stringValue] target:target visited:visited depth:depth+1 sample:sampleStr webCounters:webCounters];
     }
     
-    // 4. 数组
+    // 数组
     if ([obj isKindOfClass:[NSArray class]]) {
         for (id item in (NSArray *)obj) {
-            if ([self custom_deepTextSearch:item target:target visited:visited depth:depth+1 sample:sampleStr]) return YES;
+            if ([self custom_deepTextSearch:item target:target visited:visited depth:depth+1 sample:sampleStr webCounters:webCounters]) return YES;
         }
         return NO;
     }
     
-    // 5. 字典类型
+    // 字典类型
     if ([obj isKindOfClass:[NSDictionary class]]) {
         for (id val in [(NSDictionary *)obj allValues]) {
-            if ([self custom_deepTextSearch:val target:target visited:visited depth:depth+1 sample:sampleStr]) return YES;
+            if ([self custom_deepTextSearch:val target:target visited:visited depth:depth+1 sample:sampleStr webCounters:webCounters]) return YES;
         }
         return NO;
     }
     
-    // 6. 自定义模型对象（突破所有数组封装）
+    // 自定义模型对象
     NSString *className = NSStringFromClass([obj class]);
     if ([className hasPrefix:@"ZZ"] || [className hasPrefix:@"SimpleCheck"]) {
         unsigned int outCount, i;
-        // 使用 Runtime 强行读取这个对象里声明的所有属性
         objc_property_t *properties = class_copyPropertyList([obj class], &outCount);
         if (properties) {
             for (i = 0; i < outCount; i++) {
@@ -310,7 +343,7 @@
                     @try {
                         id val = [obj valueForKey:propertyName];
                         if (val) {
-                            if ([self custom_deepTextSearch:val target:target visited:visited depth:depth+1 sample:sampleStr]) {
+                            if ([self custom_deepTextSearch:val target:target visited:visited depth:depth+1 sample:sampleStr webCounters:webCounters]) {
                                 free(properties);
                                 return YES;
                             }
@@ -320,19 +353,6 @@
             }
             free(properties);
         }
-        
-        // 兜底字典
-        @try {
-            if ([obj respondsToSelector:@selector(mj_keyValues)]) {
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                id dict = [obj performSelector:@selector(mj_keyValues)];
-                #pragma clang diagnostic pop
-                if ([dict isKindOfClass:[NSDictionary class]]) {
-                    if ([self custom_deepTextSearch:dict target:target visited:visited depth:depth+1 sample:sampleStr]) return YES;
-                }
-            }
-        } @catch(...) {}
     }
     
     return NO;
