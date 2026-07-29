@@ -334,13 +334,15 @@ static BOOL ZZDeepTextSearch(id obj, NSString *target, NSMutableSet *visited, in
                     
                     [weakSelf custom_reloadCollectionView];
                     
-                    NSString *resultMsg = [NSString stringWithFormat:@"总计处理设备: %lu 台\n\n原生网卡+公开API 发送请求: %d 次\n\n精准命中并保留设备: %lu 台！\n成功剔除 %d 台无关设备。", (unsigned long)allProducts.count, (netReqCount + httpApiCount), (unsigned long)globalMatchedInfoIds.count, removed];
+                    // 修复：在这里使用了 localMatchCount 消除编译警告
+                    NSString *resultMsg = [NSString stringWithFormat:@"总计处理设备: %lu 台\n本地精准发现: %d 台\n原生网卡+公开API 发送请求: %d 次\n\n精准命中并保留设备: %lu 台！\n成功剔除 %d 台无关设备。", (unsigned long)allProducts.count, localMatchCount, (netReqCount + httpApiCount), (unsigned long)globalMatchedInfoIds.count, removed];
                     UIAlertController *successAlert = [UIAlertController alertControllerWithTitle:@"筛选成功" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                     [successAlert addAction:[UIAlertAction actionWithTitle:@"太棒了" style:UIAlertActionStyleDefault handler:nil]];
                     [weakSelf presentViewController:successAlert animated:YES completion:nil];
                     
                 } else {
-                    NSString *resultMsg = [NSString stringWithFormat:@"已全维度检索设备: %lu 台\n网卡拦截与API穿透成功: %d 次\n\n匹配命中: 0 台\n\n【爬虫底层证明采样】:\n%@\n\n※ 请继续向下加载更多设备后，再次重试！", (unsigned long)allProducts.count, (netReqCount + httpApiCount), sampleResponseStr.length > 0 ? sampleResponseStr : @"空"];
+                    // 修复：在这里使用了 localMatchCount 消除编译警告
+                    NSString *resultMsg = [NSString stringWithFormat:@"已全维度检索设备: %lu 台\n本地扫描发现: %d 台\n网卡拦截与API穿透成功: %d 次\n\n最终匹配命中: 0 台\n\n【爬虫底层证明采样】:\n%@\n\n※ 请继续向下加载更多设备后，再次重试！", (unsigned long)allProducts.count, localMatchCount, (netReqCount + httpApiCount), sampleResponseStr.length > 0 ? sampleResponseStr : @"空"];
                     UIAlertController *emptyAlert = [UIAlertController alertControllerWithTitle:@"当前列表无匹配项" message:resultMsg preferredStyle:UIAlertControllerStyleAlert];
                     [emptyAlert addAction:[UIAlertAction actionWithTitle:@"好的，我多加载一点" style:UIAlertActionStyleCancel handler:nil]];
                     [weakSelf presentViewController:emptyAlert animated:YES completion:nil];
